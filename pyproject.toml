@@ -26,6 +26,11 @@ classifiers = [
     "Topic :: Software Development :: Code Generators",
 ]
 
+[project.urls]
+Repository = "https://github.com/YZJYBT/pyOpAst"
+Issues = "https://github.com/YZJYBT/pyOpAst/issues"
+Changelog = "https://github.com/YZJYBT/pyOpAst/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
 # numba >=0.61 covers Python 3.10-3.13; Python 3.14 needs numba >=0.65.
 jit = ["numba>=0.61"]
