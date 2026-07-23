@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      # The jit extra is required: the verification suite asserts that --jit
+      # actually compiles (pyopt_compiled / __wrapped__ probes).
+      - name: Install
+        run: pip install -e .[jit]
+      - name: Acceptance suite
+        run: python tests/verify_pyopt.py
+      - name: Bench sanity (results must match, control must be ~1x)
+        run: python -m pyopt.bench -r 2

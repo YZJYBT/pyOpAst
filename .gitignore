@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# pyopt dev/scratch artifacts
+temp/
+.codex_jit_verify/
+tests/cases/
+
+# Claude<->Codex bridge tooling (machine-local, auto-managed per launch)
+CLAUDE.md
+AGENTS.md
+to-codex.ps1
+to-claude.ps1
+start-bridge.cmd
+start-bridge-remote.cmd
+bridge-tools/
+.bridge-socket.txt
+.bridge-target.txt
+.bridge-claude-target.txt

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=77"]  # PEP 639 SPDX license expression
+build-backend = "setuptools.build_meta"
+
+[project]
+# NOTE: "pyopt" collides with the pyOpt optimization framework on PyPI;
+# the distribution name will change before the first PyPI upload (the
+# import package and CLI command may keep the pyopt name).
+name = "pyopt"
+version = "0.1.0"
+description = "Conservative AST-level Python source optimizer: provably-semantics-preserving passes (folding, propagation, inlining, loop rewrites) with dynamic-code fallback, plus an opt-in numba JIT path."
+requires-python = ">=3.10"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "YZJYBT", email = "yzj0xfff2@gmail.com" }]
+keywords = ["optimizer", "ast", "performance", "source-to-source", "numba", "jit"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Code Generators",
+]
+
+[project.optional-dependencies]
+# numba >=0.61 covers Python 3.10-3.13; Python 3.14 needs numba >=0.65.
+jit = ["numba>=0.61"]
+
+[project.scripts]
+pyopt = "pyopt.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,136 @@
+"""Command line interface: ``python -m pyopt [options] script.py [args...]``
+or ``python -m pyopt [options] -c "code" [args...]``."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+from .pipeline import (
+    DEFAULT_MAX_ITERATIONS,
+    PASS_NAMES,
+    optimize_file,
+    optimize_source,
+)
+from .runner import execute
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="pyopt",
+        description=(
+            "Optimize a Python script with AST passes (constant folding, "
+            "algebraic simplification, dead code elimination, simple function "
+            "inlining) and run it with the current interpreter. Scopes that "
+            "use dynamic constructs (eval/exec/globals/locals/vars/compile/"
+            "__import__/import *) are left untouched."
+        ),
+    )
+    parser.add_argument("--show", action="store_true",
+                        help="print the optimized source to stdout")
+    parser.add_argument("-o", "--output", metavar="FILE",
+                        help="write the optimized source to FILE")
+    parser.add_argument("--no-run", action="store_true",
+                        help="only optimize, do not execute the script")
+    parser.add_argument("--report", action="store_true",
+                        help="print per-pass statistics to stderr")
+    parser.add_argument("--max-iterations", type=int,
+                        default=DEFAULT_MAX_ITERATIONS, metavar="N",
+                        help="max pipeline iterations (default: %(default)s)")
+    parser.add_argument("--jit", action="store_true",
+                        help="decorate hot numeric functions with numba.njit "
+                             "(optional dependency 'pyopt[jit]'; any numba "
+                             "failure falls back to plain Python at runtime; "
+                             "see README for the int64 caveat)")
+    parser.add_argument("--disable", metavar="PASSES", default="",
+                        help="comma-separated pass names to skip: "
+                             + ", ".join((*PASS_NAMES, "jit")))
+    parser.add_argument("--opt-imports", action="store_true",
+                        help="also optimize imported pure-Python modules "
+                             "under the script's directory (opt-in: modules "
+                             "whose globals are monkeypatched from outside "
+                             "must not be optimized; see README)")
+    parser.add_argument("--opt-imports-under", metavar="DIR", action="append",
+                        default=[],
+                        help="optimize imports under DIR (repeatable; "
+                             "implies the hook without adding the script's "
+                             "directory unless --opt-imports is also given)")
+    parser.add_argument("-c", "--code", metavar="CODE",
+                        help="optimize and run CODE directly (like python -c; "
+                             "remaining arguments go to sys.argv)")
+    parser.add_argument("script", nargs="?",
+                        help="path to the Python script (or, with -c, the "
+                             "first script argument)")
+    parser.add_argument("args", nargs=argparse.REMAINDER,
+                        help="arguments passed to the script")
+    ns = parser.parse_args(argv)
+
+    if ns.code is None and ns.script is None:
+        parser.error("a script path is required (or use -c CODE)")
+
+    try:
+        if ns.code is not None:
+            result = optimize_source(
+                ns.code, filename="<string>",
+                max_iterations=ns.max_iterations, jit=ns.jit,
+                disable=ns.disable,
+            )
+        else:
+            result = optimize_file(
+                ns.script, max_iterations=ns.max_iterations, jit=ns.jit,
+                disable=ns.disable,
+            )
+    except ValueError as exc:  # unknown --disable pass name
+        parser.error(str(exc))
+
+    if ns.jit:
+        from . import jitsupport
+
+        if not jitsupport.numba_available():
+            print(
+                "pyopt: numba is not available on this interpreter; "
+                "--jit decorations will run as plain Python.",
+                file=sys.stderr,
+            )
+    if ns.show:
+        print(result.source)
+    if ns.output:
+        Path(ns.output).write_text(result.source + "\n", encoding="utf-8")
+    if ns.report:
+        print(result.report.summary(), file=sys.stderr)
+    if not ns.no_run:
+        finder = None
+        if ns.opt_imports or ns.opt_imports_under:
+            from . import importhook
+
+            roots = list(ns.opt_imports_under)
+            if ns.opt_imports:
+                if ns.code is not None:
+                    roots.append(os.getcwd())
+                else:
+                    roots.append(str(Path(ns.script).resolve().parent))
+            finder = importhook.install(
+                roots,
+                max_iterations=ns.max_iterations,
+                jit=ns.jit,
+                disable=ns.disable,
+                report=ns.report,
+            )
+        try:
+            if ns.code is not None:
+                # With -c the positional slot, if used, is really the first
+                # script argument -- mimic ``python -c`` (sys.argv[0] == "-c").
+                args = ([ns.script] if ns.script is not None else []) + list(ns.args)
+                execute(result, tuple(args), write_source=ns.jit, argv0="-c")
+            else:
+                execute(result, tuple(ns.args), write_source=ns.jit)
+        finally:
+            if finder is not None:
+                importhook.uninstall(finder)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
