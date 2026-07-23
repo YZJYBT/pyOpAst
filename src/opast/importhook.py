@@ -1,6 +1,6 @@
 """Import hook: optimize imported pure-Python modules (``--opt-imports``).
 
-A :class:`PyoptFinder` on ``sys.meta_path`` intercepts imports whose source
+A :class:`OpastFinder` on ``sys.meta_path`` intercepts imports whose source
 file lives under one of the configured *roots* (by default the entry
 script's directory) and compiles the module from opast-optimized source.
 
@@ -18,7 +18,7 @@ Design constraints:
   (entry scripts keep it).
 * **Never touch ``__pycache__``.**  The standard pyc cache is keyed only by
   the source file, so optimized bytecode written there would be picked up
-  by plain ``python`` runs later.  :meth:`PyoptLoader.get_code` bypasses
+  by plain ``python`` runs later.  :meth:`OpastLoader.get_code` bypasses
   the pyc machinery entirely and uses its own content-addressed cache of
   optimized *source* (``%TMP%/opast-imports``), keyed by source text, opast
   version and options.  ``OPAST_NO_IMPORT_CACHE=1`` bypasses that cache.
@@ -61,7 +61,7 @@ class _HookOptions:
     no_cache: bool
 
 
-class PyoptLoader(SourceFileLoader):
+class OpastLoader(SourceFileLoader):
     """Compiles a module from optimized source, bypassing pyc caching."""
 
     def __init__(self, fullname: str, path: str, options: _HookOptions) -> None:
@@ -130,8 +130,8 @@ class PyoptLoader(SourceFileLoader):
         return compile(optimized, target, "exec", dont_inherit=True)
 
 
-class PyoptFinder:
-    """Meta-path finder wrapping matching modules with :class:`PyoptLoader`."""
+class OpastFinder:
+    """Meta-path finder wrapping matching modules with :class:`OpastLoader`."""
 
     def __init__(self, roots, options: _HookOptions) -> None:
         self._roots = [_norm(r) + os.sep for r in roots]
@@ -154,7 +154,7 @@ class PyoptFinder:
             return None
         if not any(origin.startswith(root) for root in self._roots):
             return None
-        spec.loader = PyoptLoader(fullname, spec.origin, self._options)
+        spec.loader = OpastLoader(fullname, spec.origin, self._options)
         return spec
 
 
@@ -171,7 +171,7 @@ def install(
     jit: bool = False,
     disable=(),
     report: bool = False,
-) -> PyoptFinder:
+) -> OpastFinder:
     """Install the import hook for modules under *roots* (directories).
     Returns the finder; pass it to :func:`uninstall` to remove."""
     # A library module's entire top level is its public surface: functions
@@ -186,12 +186,12 @@ def install(
         report=report,
         no_cache=bool(os.environ.get("OPAST_NO_IMPORT_CACHE")),
     )
-    finder = PyoptFinder(roots, options)
+    finder = OpastFinder(roots, options)
     sys.meta_path.insert(0, finder)
     return finder
 
 
-def uninstall(finder: PyoptFinder) -> None:
+def uninstall(finder: OpastFinder) -> None:
     try:
         sys.meta_path.remove(finder)
     except ValueError:

@@ -54,7 +54,7 @@ _SENTINEL = "_opast_cell_result"
 
 
 @magics_class
-class PyoptMagics(Magics):
+class OpastMagics(Magics):
     @magic_arguments.magic_arguments()
     @magic_arguments.argument("--show", action="store_true",
                               help="print the optimized source")
@@ -154,4 +154,4 @@ class PyoptMagics(Magics):
 
 
 def load_ipython_extension(ipython) -> None:
-    ipython.register_magics(PyoptMagics)
+    ipython.register_magics(OpastMagics)
