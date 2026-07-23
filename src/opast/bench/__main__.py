@@ -1,7 +1,7 @@
-"""Benchmark harness: ``python -m pyopt.bench [--repeat N] [workload ...]``.
+"""Benchmark harness: ``python -m opast.bench [--repeat N] [workload ...]``.
 
 For every workload the harness compiles the original source and the
-pyopt-optimized AST, executes both in this interpreter ``--repeat`` times
+opast-optimized AST, executes both in this interpreter ``--repeat`` times
 each (fresh globals, GC disabled during timing), verifies that both variants
 produce the same module-level ``RESULT``, and reports best-of-N wall times,
 the speedup, the one-off optimization cost and the number of AST changes.
@@ -40,7 +40,7 @@ def discover(selection: list[str]) -> list[Path]:
         if builtin.is_file():
             paths.append(builtin)
             continue
-        raise SystemExit(f"pyopt.bench: unknown workload {name!r}")
+        raise SystemExit(f"opast.bench: unknown workload {name!r}")
     return paths
 
 
@@ -99,8 +99,8 @@ def bench_one(path: Path, repeat: int, jit: bool = False) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m pyopt.bench",
-        description="Compare pyopt-optimized execution against plain CPython.",
+        prog="python -m opast.bench",
+        description="Compare opast-optimized execution against plain CPython.",
     )
     parser.add_argument("workloads", nargs="*",
                         help="workload names or .py paths (default: all built-in)")
@@ -152,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'geomean':<12} {'':>10} {'':>10} {geo:>7.2f}x")
 
     if not all_match:
-        print("\npyopt.bench: RESULT mismatch detected -- optimizer bug!",
+        print("\nopast.bench: RESULT mismatch detected -- optimizer bug!",
               file=sys.stderr)
         return 1
     return 0

@@ -4,7 +4,7 @@
 functions.  It degrades gracefully at every level:
 
 * numba missing / incompatible with this interpreter (e.g. a CPython version
-  numba does not support yet), or ``PYOPT_DISABLE_JIT`` set -> the function
+  numba does not support yet), or ``OPAST_DISABLE_JIT`` set -> the function
   is returned unchanged;
 * decoration succeeds -> calls go through a dispatcher that tries the
   compiled version and, on *any* numba-raised error (typing failure,
@@ -19,7 +19,7 @@ functions.  It degrades gracefully at every level:
   no static filter can rule out -- triggers a permanent Python fallback
   instead of silently wrong answers for the rest of the process.  The
   verification call returns the Python result (exact semantics) and costs
-  one extra Python execution; ``PYOPT_JIT_NO_VERIFY=1`` opts out.  It is a
+  one extra Python execution; ``OPAST_JIT_NO_VERIFY=1`` opts out.  It is a
   heuristic net, not a proof: later calls with much larger arguments can
   still wrap.
 
@@ -35,7 +35,7 @@ runs plain Python while accumulating evidence -- and compiles only when one
 trigger fires:
 
 * **size**: the jit pass identified which parameter feeds a loop bound; a
-  call with that argument >= ``PYOPT_JIT_LAZY_BOUND`` (default 10_000, the
+  call with that argument >= ``OPAST_JIT_LAZY_BOUND`` (default 10_000, the
   static hotness threshold) compiles immediately;
 * **single-call time**: one Python execution took >= 0.1s -- compilation
   pays for itself even if the function is never called again;
@@ -69,7 +69,7 @@ loading that entry dies with ``ModuleNotFoundError``.
 Known, documented semantic caveat of opting in: numba integers are fixed
 64-bit -- Python code whose intermediate values exceed ``int64`` silently
 wraps around under numba.  This is why ``--jit`` is opt-in, why the static
-filter in :mod:`pyopt.passes.jit` stays narrow, and what the first-call
+filter in :mod:`opast.passes.jit` stays narrow, and what the first-call
 verification above is for.
 """
 
@@ -116,11 +116,11 @@ def numba_available() -> bool:
         return False
 
 
-_DEBUG = bool(os.environ.get("PYOPT_JIT_DEBUG"))
-_VERIFY = not os.environ.get("PYOPT_JIT_NO_VERIFY")
+_DEBUG = bool(os.environ.get("OPAST_JIT_DEBUG"))
+_VERIFY = not os.environ.get("OPAST_JIT_NO_VERIFY")
 
 #: Lazy-compilation trigger thresholds (see module docstring).
-_LAZY_BOUND = int(os.environ.get("PYOPT_JIT_LAZY_BOUND", "10000"))
+_LAZY_BOUND = int(os.environ.get("OPAST_JIT_LAZY_BOUND", "10000"))
 _LAZY_SINGLE_S = 0.1
 _LAZY_CALLS = 10
 _LAZY_TOTAL_S = 0.3
@@ -155,7 +155,7 @@ def _is_infra_error(exc: BaseException) -> bool:
 
 def _debug(message: str) -> None:
     if _DEBUG:
-        print(f"pyopt-jit: {message}", file=sys.stderr)
+        print(f"opast-jit: {message}", file=sys.stderr)
 
 
 def _cacheable(func) -> bool:
@@ -195,7 +195,7 @@ def compile_only(func):
     same function was poisoned.  The raw dispatcher is what other compiled
     functions must call (a Python-level fallback wrapper cannot be typed by
     numba)."""
-    if os.environ.get("PYOPT_DISABLE_JIT"):
+    if os.environ.get("OPAST_DISABLE_JIT"):
         return None
     key = _func_key(func)
     entry = _registry.get(key)
@@ -227,7 +227,7 @@ def dispatch(compiled, python_func):
     use_python = False
 
     @functools.wraps(python_func)
-    def _pyopt_dispatcher(*args, **kwargs):
+    def _opast_dispatcher(*args, **kwargs):
         nonlocal use_python
         if use_python or state[0] is None:
             return python_func(*args, **kwargs)
@@ -264,15 +264,15 @@ def dispatch(compiled, python_func):
                 return python_func(*args, **kwargs)
             raise
 
-    _pyopt_dispatcher.pyopt_compiled = compiled
-    return _pyopt_dispatcher
+    _opast_dispatcher.opast_compiled = compiled
+    return _opast_dispatcher
 
 
 def compiled_of(wrapper):
     """The raw compiled dispatcher behind a :func:`dispatch` wrapper (None
     when compilation never happened) -- referenced by the rewritten sources
     of jitted callers so nopython code calls nopython code."""
-    return getattr(wrapper, "pyopt_compiled", None)
+    return getattr(wrapper, "opast_compiled", None)
 
 
 def maybe_njit(func):
@@ -289,7 +289,7 @@ def maybe_njit_lazy(bound_args=()):
     indices = tuple(bound_args)
 
     def decorate(python_func):
-        if os.environ.get("PYOPT_DISABLE_JIT"):
+        if os.environ.get("OPAST_DISABLE_JIT"):
             return python_func
         key = _func_key(python_func)
         entry = _registry.get(key)
@@ -330,11 +330,11 @@ def maybe_njit_lazy(bound_args=()):
                     state[0] = None
                     return python_func
                 state[1] = True
-            _pyopt_lazy_dispatcher.pyopt_compiled = compiled
+            _opast_lazy_dispatcher.opast_compiled = compiled
             return dispatch(compiled, python_func)
 
         @functools.wraps(python_func)
-        def _pyopt_lazy_dispatcher(*args, **kwargs):
+        def _opast_lazy_dispatcher(*args, **kwargs):
             nonlocal delegate
             if delegate is not None:
                 return delegate(*args, **kwargs)
@@ -366,7 +366,7 @@ def maybe_njit_lazy(bound_args=()):
                 )
             return result
 
-        _pyopt_lazy_dispatcher.pyopt_lazy = True
-        return _pyopt_lazy_dispatcher
+        _opast_lazy_dispatcher.opast_lazy = True
+        return _opast_lazy_dispatcher
 
     return decorate

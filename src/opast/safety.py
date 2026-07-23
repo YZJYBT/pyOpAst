@@ -1,6 +1,6 @@
 """Conservative detection of dynamic constructs.
 
-pyopt only transforms code it can reason about statically.  A *region* is the
+opast only transforms code it can reason about statically.  A *region* is the
 executable code that belongs directly to one scope (module, function, lambda
 or class body), excluding the bodies of nested scopes but *including* the
 parts of nested definitions that evaluate in the enclosing scope (decorators,

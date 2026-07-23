@@ -3,7 +3,7 @@
 Identities like ``x + 0 -> x`` are *not* valid for arbitrary Python objects
 (custom ``__add__``, ``-0.0 + 0 == 0.0``, ``True * 1 == 1`` ...), so this pass
 only rewrites expressions that are provably plain ``int``-valued, using the
-per-function inference from :mod:`pyopt.analysis` (which, when ``range`` is
+per-function inference from :mod:`opast.analysis` (which, when ``range`` is
 trustworthy module-wide, also proves ``for i in range(...)`` targets).
 Applied identities (``E`` a proven int expression, constants exact ``int``):
 
@@ -21,7 +21,7 @@ infinite two's complement):
 * ``E ** 2`` -> ``E * E`` for small pure ``E`` (evaluating a pure, total int
   expression twice is unobservable; ``pow`` costs far more than the re-eval)
 
-Interval-based (using :func:`pyopt.analysis.infer_int_ranges`):
+Interval-based (using :func:`opast.analysis.infer_int_ranges`):
 
 * ``abs(E)`` -> ``E`` when ``E``'s interval proves it non-negative (gated
   module-wide on ``abs`` being the untouched builtin)

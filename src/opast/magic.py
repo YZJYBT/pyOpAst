@@ -1,10 +1,10 @@
-"""IPython/Jupyter integration: the ``%%pyopt`` cell magic.
+"""IPython/Jupyter integration: the ``%%opast`` cell magic.
 
 Usage::
 
-    %load_ext pyopt          # or: %load_ext pyopt.magic
+    %load_ext opast          # or: %load_ext opast.magic
 
-    %%pyopt [--show] [--report] [--no-run] [--jit] [--disable PASSES]
+    %%opast [--show] [--report] [--no-run] [--jit] [--disable PASSES]
             [--max-iterations N]
     total = 0
     for i in range(50_000):
@@ -49,8 +49,8 @@ from .pipeline import (
 )
 from .runner import _materialize_source
 
-_CELL_FILENAME = "<pyopt-cell>"
-_SENTINEL = "_pyopt_cell_result"
+_CELL_FILENAME = "<opast-cell>"
+_SENTINEL = "_opast_cell_result"
 
 
 @magics_class
@@ -72,9 +72,9 @@ class PyoptMagics(Magics):
                               default=DEFAULT_MAX_ITERATIONS, metavar="N",
                               help="max pipeline iterations")
     @cell_magic
-    def pyopt(self, line: str, cell: str) -> None:
-        """Optimize the cell with pyopt, then run it in the user namespace."""
-        args = magic_arguments.parse_argstring(self.pyopt, line)
+    def opast(self, line: str, cell: str) -> None:
+        """Optimize the cell with opast, then run it in the user namespace."""
+        args = magic_arguments.parse_argstring(self.opast, line)
         tree = ast.parse(cell, filename=_CELL_FILENAME)
 
         # A trailing expression is the cell's *output*, but to the pipeline

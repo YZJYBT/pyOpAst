@@ -27,7 +27,7 @@ strings that are valid non-keyword identifiers.
 All-or-nothing rule
 -------------------
 The rewrites are only committed when the *result* module is completely free
-of dynamic constructs (per :mod:`pyopt.safety`) and none of the relied-upon
+of dynamic constructs (per :mod:`opast.safety`) and none of the relied-upon
 builtin names (``getattr``/``setattr``/``delattr`` for performed rewrites) is
 bound anywhere in the result.  Otherwise the module is returned untouched:
 any remaining ``exec``/``eval``/``import *`` could rebind the builtins our

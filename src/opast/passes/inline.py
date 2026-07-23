@@ -13,12 +13,12 @@ Two candidate shapes, both module-level plain ``def``s:
   call sites where the call *is* the whole value of an ``x = f(...)``,
   ``return f(...)`` or bare ``f(...)`` statement inside a function are
   rewritten: the arguments are evaluated left-to-right into fresh
-  ``_pyopt_in_<site>_<param>`` locals (any argument expression is fine --
+  ``_opast_in_<site>_<param>`` locals (any argument expression is fine --
   each is evaluated exactly once, in call order; positional only), the body
   assignments follow with all locals renamed, and the original statement
   keeps the renamed return expression.  Function locals are invisible to the
   caller by construction, so the renamed temps are the only observable
-  difference (tracebacks lose one frame -- a documented pyopt limitation).
+  difference (tracebacks lose one frame -- a documented opast limitation).
 
 Shared safety requirements (any doubt -> the call is left alone):
 
@@ -67,7 +67,7 @@ _FORBIDDEN_IN_EXPR = (
 #: Maximum number of body assignments for a statement-body candidate.
 _STMT_BODY_MAX = 6
 
-_TEMP_PREFIX = "_pyopt_in"
+_TEMP_PREFIX = "_opast_in"
 
 
 @dataclass

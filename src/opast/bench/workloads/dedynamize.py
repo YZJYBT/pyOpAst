@@ -1,6 +1,6 @@
 """Constant-string eval()/getattr() in a hot module-level loop -- exercises
 de-dynamization.  Plain CPython re-compiles the eval string on every call;
-pyopt replaces the calls with the static expressions.
+opast replaces the calls with the static expressions.
 """
 import math
 

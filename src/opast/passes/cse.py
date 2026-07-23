@@ -1,10 +1,10 @@
 """Common subexpression elimination (CSE).
 
 Within one statement block, an expression appearing two or more times is
-computed once into a ``_pyopt_cse_N`` temporary inserted before the
+computed once into a ``_opast_cse_N`` temporary inserted before the
 statement of its first occurrence, and every occurrence is replaced by the
 temp.  Eligible expressions are exactly the LICM ones
-(:func:`pyopt.analysis.hoistable_int_expr`): provably pure and total int
+(:func:`opast.analysis.hoistable_int_expr`): provably pure and total int
 arithmetic over proven-int names, plus ``len()`` of fresh never-escaping
 builtin containers (module-wide gate on no dynamic constructs / unshadowed
 builtins).  Purity+totality is what makes this sound without occurrence
@@ -51,7 +51,7 @@ from .licm import (
     unbound_risk_names,
 )
 
-_TEMP_PREFIX = "_pyopt_cse"
+_TEMP_PREFIX = "_opast_cse"
 
 
 def _worthy(node: ast.AST, containers) -> bool:

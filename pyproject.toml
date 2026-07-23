@@ -3,10 +3,8 @@ requires = ["setuptools>=77"]  # PEP 639 SPDX license expression
 build-backend = "setuptools.build_meta"
 
 [project]
-# NOTE: "pyopt" collides with the pyOpt optimization framework on PyPI;
-# the distribution name will change before the first PyPI upload (the
-# import package and CLI command may keep the pyopt name).
-name = "pyopt"
+# Distribution/import/CLI name: opast ("OPtimizing AST"); GitHub repo: pyOpAst.
+name = "opast"
 version = "0.1.0"
 description = "Conservative AST-level Python source optimizer: provably-semantics-preserving passes (folding, propagation, inlining, loop rewrites) with dynamic-code fallback, plus an opt-in numba JIT path."
 requires-python = ">=3.10"
@@ -33,7 +31,7 @@ classifiers = [
 jit = ["numba>=0.61"]
 
 [project.scripts]
-pyopt = "pyopt.__main__:main"
+opast = "opast.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

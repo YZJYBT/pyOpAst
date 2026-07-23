@@ -103,7 +103,7 @@ class OptimizationReport:
 
     def summary(self) -> str:
         lines = [
-            f"pyopt: {self.total_changes} change(s) in {self.iterations} iteration(s)"
+            f"opast: {self.total_changes} change(s) in {self.iterations} iteration(s)"
         ]
         for name, stats in self.per_pass.items():
             line = f"  {name}: {stats.changes} change(s)"
@@ -117,7 +117,7 @@ class OptimizationReport:
 class OptimizationResult:
     tree: ast.Module
     report: OptimizationReport
-    filename: str = "<pyopt>"
+    filename: str = "<opast>"
 
     @property
     def source(self) -> str:
@@ -156,7 +156,7 @@ def optimize_ast(
             break
     if jit and "jit" not in disabled:
         # One-shot, after the fixpoint: decorates hot numeric functions with
-        # pyopt.jitsupport.maybe_njit (opt-in, see README caveats).
+        # opast.jitsupport.maybe_njit (opt-in, see README caveats).
         from .passes.jit import JitInjection
 
         jit_pass = JitInjection()
@@ -168,7 +168,7 @@ def optimize_ast(
 
 def optimize_source(
     source: str,
-    filename: str = "<pyopt>",
+    filename: str = "<opast>",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     jit: bool = False,
     disable=(),

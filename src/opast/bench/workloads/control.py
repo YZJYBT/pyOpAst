@@ -1,5 +1,5 @@
 """Control workload: nothing for the optimizer to change (dynamic values,
-floats, no trivial helpers).  Expected speedup ~1.00x -- verifies pyopt adds
+floats, no trivial helpers).  Expected speedup ~1.00x -- verifies opast adds
 no runtime regression when it finds no opportunities.
 """
 import random

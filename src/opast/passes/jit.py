@@ -2,7 +2,7 @@
 
 One-shot pass executed once after the optimization fixpoint (never inside
 the iteration loop).  Module-level functions that were not inlined are
-decorated with :func:`pyopt.jitsupport.maybe_njit` when they are
+decorated with :func:`opast.jitsupport.maybe_njit` when they are
 
 * **hot** by a static heuristic: contain nested loops, or a loop whose trip
   count is statically ≥ 10_000 (``for ... in range(<consts>)``, or
@@ -23,14 +23,14 @@ Lazy candidates (runtime-decided hotness)
 
 Whitelisted functions that are *not* statically hot but contain a loop
 whose trip count only runtime knows (``for i in range(n)``,
-``while i < n``) get :func:`pyopt.jitsupport.maybe_njit_lazy` instead:
+``while i < n``) get :func:`opast.jitsupport.maybe_njit_lazy` instead:
 plain Python plus observation until a runtime trigger (bound-argument
 size, single-call time, or call volume) proves the function hot, then the
 usual compile + verify + guarded-dispatch machinery takes over.  Loop
 bounds that name a positional parameter are passed to the decorator as
 argument indices, enabling the immediate size trigger.  Lazy candidates
 must be standalone -- functions participating in peer calls are excluded,
-because the raw-dispatcher aliases (``_pyopt_njit_G``) resolve at
+because the raw-dispatcher aliases (``_opast_njit_G``) resolve at
 decoration time, which a lazily-compiled callee cannot honour.
 
 njit inter-calls
@@ -42,7 +42,7 @@ outside the shrinking candidate set disqualifies) with call cycles dropped
 selection and pull in their callees.  A caller cannot be compiled from its
 original body -- at runtime the callee's global name holds the fallback
 *wrapper*, which numba cannot type -- so callers get a duplicated
-``_pyopt_jitsrc_F`` def whose peer calls are rewritten to ``_pyopt_njit_G``
+``_opast_jitsrc_F`` def whose peer calls are rewritten to ``_opast_njit_G``
 raw-dispatcher aliases (``jitsupport.compiled_of``); the original def stays
 as the Python fallback, whose calls hit the wrappers and remain guarded.
 A callee that fails to compile leaves its alias None, and every compiled
@@ -50,7 +50,7 @@ caller then degrades to its own Python fallback at first call.
 
 The whitelist only predicts *compilation success*; correctness under all
 argument types is guaranteed by the runtime dispatcher's permanent Python
-fallback (see :mod:`pyopt.jitsupport`).  The int64-wraparound caveat is
+fallback (see :mod:`opast.jitsupport`).  The int64-wraparound caveat is
 inherent to opting in and documented in the README.
 
 Loop outlining
@@ -59,8 +59,8 @@ Loop outlining
 Hot numeric code rarely arrives pre-packaged as a compatible function, so a
 second stage *outlines* hot whitelisted loops -- at module top level and
 inside functions that were not selected above -- into fresh module-level
-functions ``_pyopt_jit_loop_N`` decorated the same way, replacing the loop
-with ``out1, out2 = _pyopt_jit_loop_N(in1, in2)``.
+functions ``_opast_jit_loop_N`` decorated the same way, replacing the loop
+with ``out1, out2 = _opast_jit_loop_N(in1, in2)``.
 
 * **Inputs** are the loop's names that are *definitely bound* before the
   loop (same straight-line dominance scan as LICM) plus names never bound in
@@ -105,8 +105,8 @@ from ..analysis import all_bound_names, binding_names
 from ..safety import iter_region, tree_has_dynamic
 from .licm import definite_bindings, unbound_risk_names
 
-_HELPER_NAME = "_pyopt_jit"
-_OUTLINE_PREFIX = "_pyopt_jit_loop"
+_HELPER_NAME = "_opast_jit"
+_OUTLINE_PREFIX = "_opast_jit_loop"
 _HOT_TRIP = 10_000
 
 _ALLOWED_CALLS = frozenset(
@@ -377,7 +377,7 @@ def _acyclic_names(calls: dict[str, set[str]]) -> set[str]:
 
 
 class _PeerCallRewriter(ast.NodeTransformer):
-    """Redirects peer calls to the raw njit dispatchers (``_pyopt_njit_*``)
+    """Redirects peer calls to the raw njit dispatchers (``_opast_njit_*``)
     inside the *compiled* copy of a caller.  The original def keeps calling
     the wrappers, so the Python fallback path stays fully guarded."""
 
@@ -811,7 +811,7 @@ class JitInjection:
             called_by_peer |= calls[name]
         njit_names: dict[str, str] = {}
         for name in sorted(called_by_peer):
-            alias = f"_pyopt_njit_{name}"
+            alias = f"_opast_njit_{name}"
             while alias in taken:
                 alias += "_"
             taken.add(alias)
@@ -861,7 +861,7 @@ class JitInjection:
                 # def stays untouched as the Python fallback (its calls hit
                 # the wrappers, which guard their own fallback).
                 src = copy.deepcopy(func)
-                src_name = f"_pyopt_jitsrc_{func.name}"
+                src_name = f"_opast_jitsrc_{func.name}"
                 while src_name in taken:
                     src_name += "_"
                 taken.add(src_name)
@@ -921,7 +921,7 @@ class JitInjection:
                 continue
             break
         helper_import = ast.Import(
-            names=[ast.alias(name="pyopt.jitsupport", asname=helper)]
+            names=[ast.alias(name="opast.jitsupport", asname=helper)]
         )
         # Outlined defs go right after the helper import: they execute (and
         # evaluate their decorator) before any call site further down.

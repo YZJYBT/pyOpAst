@@ -1,4 +1,4 @@
-"""Execute optimised code with the interpreter running pyopt (CPython by
+"""Execute optimised code with the interpreter running opast (CPython by
 default) -- mimicking ``python script.py`` as closely as practical."""
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def _materialize_source(result: OptimizationResult) -> str:
     digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:16]
     stem = Path(result.filename).stem or "module"
     stem = "".join(c if c.isalnum() or c in "-_." else "" for c in stem) or "module"
-    cache_dir = Path(tempfile.gettempdir()) / "pyopt-jit"
+    cache_dir = Path(tempfile.gettempdir()) / "opast-jit"
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / f"{stem}-{digest}.py"
     if not path.exists():
@@ -54,7 +54,7 @@ def execute(
     ``python -c``).
     """
     filename = result.filename
-    is_real_file = filename not in ("<pyopt>", "<string>") and os.path.exists(filename)
+    is_real_file = filename not in ("<opast>", "<string>") and os.path.exists(filename)
     script_path = str(Path(filename).resolve()) if is_real_file else filename
 
     compile_target = _materialize_source(result) if write_source else script_path
@@ -98,7 +98,7 @@ def run_path(
 ) -> OptimizationResult:
     """Optimise the script at *path* and run it. Returns the result.
 
-    *disable* skips passes by name (see :data:`pyopt.PASS_NAMES`)."""
+    *disable* skips passes by name (see :data:`opast.PASS_NAMES`)."""
     result = optimize_file(
         path, max_iterations=max_iterations, jit=jit, disable=disable
     )
@@ -109,14 +109,14 @@ def run_path(
 def run_source(
     source: str,
     argv: tuple[str, ...] = (),
-    filename: str = "<pyopt>",
+    filename: str = "<opast>",
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     jit: bool = False,
     disable=(),
 ) -> OptimizationResult:
     """Optimise *source* and run it. Returns the result.
 
-    *disable* skips passes by name (see :data:`pyopt.PASS_NAMES`)."""
+    *disable* skips passes by name (see :data:`opast.PASS_NAMES`)."""
     result = optimize_source(
         source, filename=filename, max_iterations=max_iterations, jit=jit,
         disable=disable,

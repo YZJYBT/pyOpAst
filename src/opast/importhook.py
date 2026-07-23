@@ -2,7 +2,7 @@
 
 A :class:`PyoptFinder` on ``sys.meta_path`` intercepts imports whose source
 file lives under one of the configured *roots* (by default the entry
-script's directory) and compiles the module from pyopt-optimized source.
+script's directory) and compiles the module from opast-optimized source.
 
 Design constraints:
 
@@ -20,8 +20,8 @@ Design constraints:
   the source file, so optimized bytecode written there would be picked up
   by plain ``python`` runs later.  :meth:`PyoptLoader.get_code` bypasses
   the pyc machinery entirely and uses its own content-addressed cache of
-  optimized *source* (``%TMP%/pyopt-imports``), keyed by source text, pyopt
-  version and options.  ``PYOPT_NO_IMPORT_CACHE=1`` bypasses that cache.
+  optimized *source* (``%TMP%/opast-imports``), keyed by source text, opast
+  version and options.  ``OPAST_NO_IMPORT_CACHE=1`` bypasses that cache.
 * **Take over or stand aside.**  ``find_spec`` returns None for anything it
   does not rewrite, so builtin/frozen/extension modules, non-matching
   paths and other meta-path finders behave exactly as without the hook.
@@ -30,7 +30,7 @@ Design constraints:
   original file path is kept for display; with ``--jit`` the cache file is
   used instead so numba can read matching sources).
 * Any failure to optimize falls back to compiling the original source --
-  an import must never break because of pyopt.
+  an import must never break because of opast.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ from pathlib import Path
 
 from .pipeline import DEFAULT_MAX_ITERATIONS, _normalize_disable, optimize_source
 
-_CACHE_DIR = Path(tempfile.gettempdir()) / "pyopt-imports"
+_CACHE_DIR = Path(tempfile.gettempdir()) / "opast-imports"
 
 
 def _norm(path: str | os.PathLike) -> str:
@@ -74,7 +74,7 @@ class PyoptLoader(SourceFileLoader):
         key = "\x00".join(
             (
                 source,
-                _pyopt_version(),
+                _opast_version(),
                 str(opts.max_iterations),
                 str(opts.jit),
                 ",".join(opts.disable),
@@ -101,7 +101,7 @@ class PyoptLoader(SourceFileLoader):
                 )
             except Exception as exc:  # never break an import
                 print(
-                    f"pyopt: optimizing import {fullname!r} failed ({exc!r}); "
+                    f"opast: optimizing import {fullname!r} failed ({exc!r}); "
                     "running it unoptimized",
                     file=sys.stderr,
                 )
@@ -109,7 +109,7 @@ class PyoptLoader(SourceFileLoader):
             optimized = result.source + "\n"
             if opts.report:
                 print(
-                    f"pyopt: import {fullname!r}: "
+                    f"opast: import {fullname!r}: "
                     f"{result.report.total_changes} change(s) in "
                     f"{result.report.iterations} iteration(s)",
                     file=sys.stderr,
@@ -120,7 +120,7 @@ class PyoptLoader(SourceFileLoader):
             except OSError:
                 pass  # cache is best-effort
         elif opts.report:
-            print(f"pyopt: import {fullname!r}: cached", file=sys.stderr)
+            print(f"opast: import {fullname!r}: cached", file=sys.stderr)
 
         # With --jit numba reads sources via inspect: compile against the
         # cache file, whose lines match exactly.  Otherwise keep the
@@ -135,11 +135,11 @@ class PyoptFinder:
 
     def __init__(self, roots, options: _HookOptions) -> None:
         self._roots = [_norm(r) + os.sep for r in roots]
-        self._exclude = _norm(Path(__file__).parent) + os.sep  # pyopt itself
+        self._exclude = _norm(Path(__file__).parent) + os.sep  # opast itself
         self._options = options
 
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.partition(".")[0] == "pyopt":
+        if fullname.partition(".")[0] == "opast":
             return None
         spec = PathFinder.find_spec(fullname, path, target)
         if (
@@ -158,7 +158,7 @@ class PyoptFinder:
         return spec
 
 
-def _pyopt_version() -> str:
+def _opast_version() -> str:
     from . import __version__
 
     return __version__
@@ -184,7 +184,7 @@ def install(
         jit=jit,
         disable=tuple(sorted(disabled)),
         report=report,
-        no_cache=bool(os.environ.get("PYOPT_NO_IMPORT_CACHE")),
+        no_cache=bool(os.environ.get("OPAST_NO_IMPORT_CACHE")),
     )
     finder = PyoptFinder(roots, options)
     sys.meta_path.insert(0, finder)

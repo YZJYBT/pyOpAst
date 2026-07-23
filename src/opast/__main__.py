@@ -1,5 +1,5 @@
-"""Command line interface: ``python -m pyopt [options] script.py [args...]``
-or ``python -m pyopt [options] -c "code" [args...]``."""
+"""Command line interface: ``python -m opast [options] script.py [args...]``
+or ``python -m opast [options] -c "code" [args...]``."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from .runner import execute
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="pyopt",
+        prog="opast",
         description=(
             "Optimize a Python script with AST passes (constant folding, "
             "algebraic simplification, dead code elimination, simple function "
@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="max pipeline iterations (default: %(default)s)")
     parser.add_argument("--jit", action="store_true",
                         help="decorate hot numeric functions with numba.njit "
-                             "(optional dependency 'pyopt[jit]'; any numba "
+                             "(optional dependency 'opast[jit]'; any numba "
                              "failure falls back to plain Python at runtime; "
                              "see README for the int64 caveat)")
     parser.add_argument("--disable", metavar="PASSES", default="",
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if not jitsupport.numba_available():
             print(
-                "pyopt: numba is not available on this interpreter; "
+                "opast: numba is not available on this interpreter; "
                 "--jit decorations will run as plain Python.",
                 file=sys.stderr,
             )

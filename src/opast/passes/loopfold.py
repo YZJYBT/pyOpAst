@@ -42,7 +42,7 @@ Safety notes:
   nothing can observe the per-iteration intermediate values the rewrite
   collapses -- this is why module scope and ``global``-declared names are
   fine, and why folding inside ``try``/``with`` is sound (the loop
-  provably cannot raise).  As elsewhere in pyopt, another *thread*
+  provably cannot raise).  As elsewhere in opast, another *thread*
   polling the bindings mid-loop is not part of the semantics contract;
 * class bodies are left alone: a metaclass ``__prepare__`` mapping would
   observe every per-iteration store this rewrite removes.

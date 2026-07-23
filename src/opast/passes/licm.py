@@ -1,18 +1,18 @@
 """Loop-invariant code motion (LICM).
 
 Hoists loop-invariant expressions out of ``while``/``for`` bodies (and
-``while`` tests) into a fresh ``_pyopt_inv_N = <expr>`` assignment placed
+``while`` tests) into a fresh ``_opast_inv_N = <expr>`` assignment placed
 immediately before the loop.
 
 Hoisting changes *when* (and for zero-iteration loops, *whether*) an
 expression is evaluated, so an expression qualifies only if it is provably
-pure and total (see :func:`pyopt.analysis.hoistable_int_expr`):
+pure and total (see :func:`opast.analysis.hoistable_int_expr`):
 
 * int arithmetic over names proven plain-int by
-  :func:`pyopt.analysis.infer_int_names` (``//``/``%`` need a non-zero int
+  :func:`opast.analysis.infer_int_names` (``//``/``%`` need a non-zero int
   constant divisor, shifts a 0..256 constant amount);
 * ``len(x)`` where *x* qualifies under
-  :func:`pyopt.analysis.fresh_container_names` -- a fresh, never-escaping,
+  :func:`opast.analysis.fresh_container_names` -- a fresh, never-escaping,
   never-mutated builtin container -- additionally gated module-wide on zero
   dynamic constructs and no shadowing of ``len``/constructor builtins;
 * every name is invariant: not bound anywhere in the loop's subtree
@@ -25,7 +25,7 @@ pure and total (see :func:`pyopt.analysis.hoistable_int_expr`):
 * contains at least one name (pure-constant expressions are left to the
   folding pass).
 
-Temporaries use the reserved ``_pyopt_inv_`` prefix; the counter starts
+Temporaries use the reserved ``_opast_inv_`` prefix; the counter starts
 above any existing suffix in the module.  Nested scopes inside loop bodies
 are never entered; module level is never hoisted (globals may be rebound by
 called functions).  Function scopes only, as with algebraic simplification.
@@ -48,7 +48,7 @@ from ..analysis import (
 from ..safety import region_is_dynamic, tree_has_dynamic
 from .base import ScopedTransformer
 
-_TEMP_PREFIX = "_pyopt_inv"
+_TEMP_PREFIX = "_opast_inv"
 
 _LOOPS = (ast.While, ast.For, ast.AsyncFor)
 

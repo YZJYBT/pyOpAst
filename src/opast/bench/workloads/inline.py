@@ -1,7 +1,7 @@
 """Tight loop over trivial helper calls -- exercises function inlining.
 
 Plain CPython pays full call overhead (frame push/pop) for every helper
-call; pyopt inlines the bodies at the call sites.
+call; opast inlines the bodies at the call sites.
 """
 
 def add(a, b):

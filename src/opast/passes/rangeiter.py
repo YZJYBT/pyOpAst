@@ -2,13 +2,13 @@
 
 Rewrites
 
-    for i in range(len(x)):          for _pyopt_elem_N in x:
-        use(x[i])               ->       use(_pyopt_elem_N)
+    for i in range(len(x)):          for _opast_elem_N in x:
+        use(x[i])               ->       use(_opast_elem_N)
 
 when the index is used *only* to subscript ``x``, and otherwise
 
-    for i in range(len(x)):          for i, _pyopt_elem_N in enumerate(x):
-        use(i, x[i])            ->       use(i, _pyopt_elem_N)
+    for i in range(len(x)):          for i, _opast_elem_N in enumerate(x):
+        use(i, x[i])            ->       use(i, _opast_elem_N)
 
 which keeps ``i`` bound exactly as before (same per-iteration values, same
 final value, still unbound after zero iterations).  Both forms drop the
@@ -20,7 +20,7 @@ Safety conditions (any doubt -> no rewrite):
   no dynamic constructs module-wide and the names never bound anywhere --
   the fresh-container gate of the ``len()`` machinery plus the ``range``
   builtin gate;
-* ``x`` qualifies under :func:`pyopt.analysis.fresh_container_names`
+* ``x`` qualifies under :func:`opast.analysis.fresh_container_names`
   (bound exactly once, never escaping, never mutated, never rebound), so
   its length and elements cannot change during the loop -- which is what
   makes ``x[i]``-at-use-time equal to element-at-iteration-time -- **and**
@@ -56,7 +56,7 @@ from ..safety import iter_region, tree_has_dynamic
 from .base import ScopedTransformer
 from .licm import container_gate, subtree_bindings
 
-_TEMP_PREFIX = "_pyopt_elem"
+_TEMP_PREFIX = "_opast_elem"
 
 #: Binding value shapes proving *sequence* semantics (iteration order is
 #: exactly ``x[0..len(x)-1]``).

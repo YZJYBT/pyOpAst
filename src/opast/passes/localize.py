@@ -2,7 +2,7 @@
 
 A name read inside a hot loop body costs a ``LOAD_GLOBAL`` (module dict, then
 builtins dict) on every iteration.  When the name provably always refers to
-the same object, binding it once to a ``_pyopt_glb_N`` local right before the
+the same object, binding it once to a ``_opast_glb_N`` local right before the
 loop turns every read into a ``LOAD_FAST``.
 
 A name qualifies when the whole module is free of dynamic constructs and:
@@ -30,7 +30,7 @@ Runs last in the pipeline so that inlining and comp-to-map get first claim
 on the names they understand (``map``/``filter`` introduced by comp-to-map
 are picked up here on the next iteration).  Under ``--jit`` the numba
 whitelist builtins are excluded (``jit_mode``): rewriting ``abs(x)`` to
-``_pyopt_glb_0(x)`` inside a would-be-jitted function would make it fail
+``_opast_glb_0(x)`` inside a would-be-jitted function would make it fail
 numba's typing and lose the compilation.
 """
 
@@ -45,11 +45,11 @@ from ..safety import SCOPE_NODES, _boundary_children, region_is_dynamic, tree_ha
 from .base import ScopedTransformer
 from .licm import definite_bindings
 
-_TEMP_PREFIX = "_pyopt_glb"
+_TEMP_PREFIX = "_opast_glb"
 
 _COMP_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
-#: Builtins the numba whitelist may call by name (pyopt.passes.jit); kept as
+#: Builtins the numba whitelist may call by name (opast.passes.jit); kept as
 #: globals under --jit so jitted functions still type-check.
 _JIT_WHITELIST_BUILTINS = frozenset(
     {"range", "abs", "min", "max", "round", "divmod", "int", "float", "bool"}
@@ -211,7 +211,7 @@ class GlobalLocalization(ScopedTransformer):
 
     # -- loops --------------------------------------------------------------
     def _candidate(self, name: str) -> bool:
-        if name.startswith("_pyopt_") or name.startswith("__"):
+        if name.startswith("_opast_") or name.startswith("__"):
             return False
         if any(name in scope for scope in self._scopes):
             return False  # a local (or shadowed) name, not a stable global

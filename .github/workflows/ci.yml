@@ -19,10 +19,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       # The jit extra is required: the verification suite asserts that --jit
-      # actually compiles (pyopt_compiled / __wrapped__ probes).
+      # actually compiles (opast_compiled / __wrapped__ probes).
       - name: Install
         run: pip install -e .[jit]
       - name: Acceptance suite
-        run: python tests/verify_pyopt.py
+        run: python tests/verify_opast.py
       - name: Bench sanity (results must match, control must be ~1x)
-        run: python -m pyopt.bench -r 2
+        run: python -m opast.bench -r 2

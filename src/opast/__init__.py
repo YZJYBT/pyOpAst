@@ -1,4 +1,4 @@
-"""pyopt -- AST-based Python source optimizer.
+"""opast -- AST-based Python source optimizer.
 
 Optimizations: constant folding, algebraic simplification, dead code
 elimination and simple function inlining.  Scopes containing dynamic
@@ -7,7 +7,7 @@ are conservatively skipped so optimization never changes their behaviour.
 
 Typical use::
 
-    from pyopt import optimize_file, run_path
+    from opast import optimize_file, run_path
 
     result = optimize_file("script.py")
     print(result.source)            # optimized source
@@ -36,7 +36,7 @@ from .runner import execute, run_path, run_source
 
 
 def load_ipython_extension(ipython) -> None:
-    """Enable ``%%pyopt`` in IPython/Jupyter via ``%load_ext pyopt``."""
+    """Enable ``%%opast`` in IPython/Jupyter via ``%load_ext opast``."""
     from .magic import load_ipython_extension as _load
 
     _load(ipython)
