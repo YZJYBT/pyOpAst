@@ -440,7 +440,11 @@ def verify_constant_propagation() -> Area:
     )
     assert_same_output(area, tuple_partial)
     s = show(tuple_partial)
-    if s.returncode != 0 or "x, y = (1, make())" not in s.stdout or "print(x, y)" not in s.stdout:
+    tuple_assignment_kept = (
+        "x, y = (1, make())" in s.stdout
+        or "x, y = 1, make()" in s.stdout
+    )
+    if s.returncode != 0 or not tuple_assignment_kept or "print(x, y)" not in s.stdout:
         area.fail("tuple unpacking with non-constant element was propagated", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(tuple_partial)]))
 
     tuple_star = write_case(
