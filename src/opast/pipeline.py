@@ -11,6 +11,7 @@ from .passes import (
     AlgebraicSimplification,
     CommonSubexpressionElimination,
     ComprehensionToMap,
+    ConditionNarrowing,
     ConstantFolding,
     ConstantPropagation,
     DeadCodeElimination,
@@ -41,6 +42,7 @@ PASS_CLASSES = (
     ConstantPropagation,
     AlgebraicSimplification,
     LoopFolding,
+    ConditionNarrowing,  # decides interval-provable tests; dead-code reaps
     DeadCodeElimination,
     # Before LICM/CSE: those hoist repeated ``len(x)`` into a temp, which
     # would destroy the ``range(len(x))`` shape this pass matches (algebra

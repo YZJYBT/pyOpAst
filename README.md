@@ -31,7 +31,7 @@ Three principles drive every pass:
 
 ## Optimization passes
 
-The pipeline iterates to a fixpoint (default ≤ 8 rounds): de-dynamize → folding → constant propagation → algebraic → loop-fold → dead code → range-to-iter → LICM → CSE → unused → inline → loop-to-comp → comp-to-map → localize. Each pass feeds the next; collapsed constants cascade outward across iterations. See [README-ZH.md](README-ZH.md) for the full safety-condition spec of each pass.
+The pipeline iterates to a fixpoint (default ≤ 8 rounds): de-dynamize → folding → constant propagation → algebraic → loop-fold → cond-narrow → dead code → range-to-iter → LICM → CSE → unused → inline → loop-to-comp → comp-to-map → localize. Each pass feeds the next; collapsed constants cascade outward across iterations. See [README-ZH.md](README-ZH.md) for the full safety-condition spec of each pass.
 
 | Pass | What it does |
 | --- | --- |
@@ -40,6 +40,7 @@ The pipeline iterates to a fixpoint (default ≤ 8 rounds): de-dynamize → fold
 | `const-prop` | Substitutes constants for variables along four routes: single-binding names (whole scope), **cross-scope** module constants into later-defined functions, **span propagation** for multiply-bound names (from an assignment up to the first statement that could rebind), and **copy propagation** `y = x` between plain locals (function scopes only). |
 | `algebraic` | Identity cleanup (`x+0`, `x*1`, `-(-x)`, …) plus strength reduction — `E % 2**k → E & mask`, `E // 2**k → E >> k`, `E ** 2 → E * E` — and interval-analysis-backed `abs(E) → E` for provably non-negative `E`. Proven-`float` expressions get only the **bit-exact** identities (`F - 0`, `F * 1`, `F / 1`, `F ** 1`, `+F`, `-(-F)`); `F + 0` and `F // 1` are deliberately excluded because they change `-0.0` and floor respectively. Never duplicates or drops effects. |
 | `loop-fold` | **Closed-form loop evaluation**: a `for i in range(<const>)` loop whose body is pure int arithmetic (no calls) is simulated exactly at optimization time and replaced by its final constant assignments. Step and magnitude budgets; any simulated exception keeps the loop. A successful fold proves the loop cannot raise, so it is legal even inside `try`/`with`. |
+| `cond-narrow` | Decides comparisons between proven-`int` expressions whose intervals settle the outcome and replaces them with `True`/`False` for `dead-code` to reap — `if i < 0:` inside `for i in range(n)` disappears. Combines the flow-insensitive base intervals with **path-sensitive narrowing** (inside `if c:` the condition holds, so `if k > 10: ... if k > 5:` decides the inner test) and straight-line assignment transfer. Sound by construction: any name a statement binds is reset to its base interval afterwards, and entering a loop body resets everything the loop rebinds before applying the test as a fact. Only pure int expressions are folded, so no side effect can be removed. |
 | `dead-code` | Unreachable statements after `return`/`raise`/`break`/`continue`, constant-condition `if`/`while` (with `else` semantics), `assert True`, useless constant expression statements, redundant `pass`. |
 | `range-to-iter` | `for i in range(len(x))` over a provably fresh *sequence* becomes `for v in x` (index dead) or `for i, v in enumerate(x)` (index live); per-iteration `BINARY_SUBSCR` lookups disappear. Only exact `x[i]` loads are replaced; the enumerate form keeps `x` and `i` bound, so leftovers stay correct. |
 | `licm` | Hoists provably pure-and-total loop-invariant int **and float** expressions (plus `len()` of fresh containers) out of loop bodies and `while` tests into pre-loop temporaries, with dominance-checked definite binding. Float admits `+`/`-`/`*` (overflow yields `inf`, never raises) and division by a non-zero constant; `**` is excluded (`(-8.0) ** 0.5` is complex), and the int/float name sets stay separate so int-only forms like `F << 2` cannot slip through. |
@@ -69,7 +70,7 @@ python -m opast.bench --jit daily
 python -m opast.bench --list
 ```
 
-16 built-in workloads, each executed twice per measurement (original vs optimized) in the same interpreter with GC disabled and a `RESULT` equality check. Note that CPython's own compiler already does trivial constant folding — opast's wins come from what CPython does *not* do: inlining, type-proven algebraic rewrites, loop rewrites, de-dynamization.
+17 built-in workloads, each executed twice per measurement (original vs optimized) in the same interpreter with GC disabled and a `RESULT` equality check. Note that CPython's own compiler already does trivial constant folding — opast's wins come from what CPython does *not* do: inlining, type-proven algebraic rewrites, loop rewrites, de-dynamization.
 
 ## IPython / Jupyter
 

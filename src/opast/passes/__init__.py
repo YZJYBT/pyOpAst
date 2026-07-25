@@ -3,6 +3,7 @@
 from .algebra import AlgebraicSimplification
 from .base import ScopedTransformer
 from .comprehension import ComprehensionToMap
+from .condnarrow import ConditionNarrowing
 from .cse import CommonSubexpressionElimination
 from .deadcode import DeadCodeElimination
 from .dedynamize import DeDynamize
@@ -23,6 +24,7 @@ __all__ = [
     "ConstantPropagation",
     "AlgebraicSimplification",
     "LoopFolding",
+    "ConditionNarrowing",
     "DeadCodeElimination",
     "LoopInvariantMotion",
     "CommonSubexpressionElimination",
