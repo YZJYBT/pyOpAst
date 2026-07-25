@@ -29,6 +29,31 @@ INT_BIN_OPS = (
 
 INT_UNARY_OPS = (ast.USub, ast.UAdd, ast.Invert)
 
+#: Binary operators whose result is a plain ``float`` whenever at least one
+#: operand is a plain ``float`` and the other is a plain ``int``/``float``.
+#: ``**`` is excluded: ``(-8.0) ** 0.5`` yields a *complex*.  ``/`` is
+#: included even though ``int / int`` is also float -- see
+#: :func:`is_float_expr`.  ``//``/``%``/``/`` can raise ZeroDivisionError but
+#: still produce a float when they complete, which is all this predicate
+#: claims (hoisting additionally requires a non-zero constant divisor).
+FLOAT_BIN_OPS = (
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.FloorDiv,
+    ast.Mod,
+)
+
+#: Unary operators that keep a plain ``float`` a plain ``float`` (``~`` is a
+#: TypeError on floats).
+FLOAT_UNARY_OPS = (ast.USub, ast.UAdd)
+
+#: Float operators that are *total* (never raise) -- the subset LICM/CSE may
+#: evaluate speculatively without a divisor check.  Overflow yields ``inf``
+#: rather than an exception, so these are safe on every float input.
+FLOAT_TOTAL_OPS = (ast.Add, ast.Sub, ast.Mult)
+
 #: Builtin calls whose result is a *fresh* container object.
 BUILTIN_CONTAINER_CALLS = frozenset(
     {"list", "tuple", "set", "dict", "sorted", "frozenset", "str", "bytes", "range"}
@@ -315,6 +340,167 @@ def is_int_expr(
             node.operand, proven, containers
         )
     return False
+
+
+def is_float_expr(
+    node: ast.AST,
+    floats: frozenset[str] | set[str],
+    ints: frozenset[str] | set[str] = frozenset(),
+    containers: frozenset[str] | set[str] = frozenset(),
+) -> bool:
+    """True if *node* provably evaluates to a plain ``float``.
+
+    A float appears either as a float constant/name, from mixing a float
+    with an int (``float + int -> float``), or from true division of two
+    proven numbers (``int / int`` is a float too).  ``bool`` never counts:
+    it is filtered out by the same ``type(...) is`` checks used for ints.
+    ``**`` is never float-closed (negative base, fractional exponent gives a
+    complex), so it is absent from :data:`FLOAT_BIN_OPS`.
+    """
+    if isinstance(node, ast.Constant):
+        return type(node.value) is float
+    if isinstance(node, ast.Name):
+        return isinstance(node.ctx, ast.Load) and node.id in floats
+    if isinstance(node, ast.BinOp):
+        if isinstance(node.op, ast.Div):
+            # True division of any two proven numbers yields a float.
+            return _is_number_expr(
+                node.left, floats, ints, containers
+            ) and _is_number_expr(node.right, floats, ints, containers)
+        if isinstance(node.op, FLOAT_BIN_OPS):
+            left_f = is_float_expr(node.left, floats, ints, containers)
+            right_f = is_float_expr(node.right, floats, ints, containers)
+            if not (left_f or right_f):
+                return False  # int-only: the int analysis owns this
+            return (
+                left_f or is_int_expr(node.left, ints, containers)
+            ) and (right_f or is_int_expr(node.right, ints, containers))
+        return False
+    if isinstance(node, ast.UnaryOp):
+        return isinstance(node.op, FLOAT_UNARY_OPS) and is_float_expr(
+            node.operand, floats, ints, containers
+        )
+    return False
+
+
+def _is_number_expr(node, floats, ints, containers) -> bool:
+    return is_float_expr(node, floats, ints, containers) or is_int_expr(
+        node, ints, containers
+    )
+
+
+def infer_float_names(
+    scope: ast.AST,
+    ints: frozenset[str] | set[str] = frozenset(),
+    containers: frozenset[str] | set[str] = frozenset(),
+) -> frozenset[str]:
+    """Names local to *scope* whose every binding provably produces a plain
+    ``float``.  Mirrors :func:`infer_int_names` (same greatest-fixpoint
+    argument, same disqualification rules); *ints* are the names already
+    proven plain ``int`` in the same scope, which may feed mixed arithmetic.
+    """
+    bindings: dict[str, list[ast.AST]] = {}
+    disqualified: set[str] = set(_own_params(scope))
+    recorded: set[int] = set()
+
+    for node in iter_region(scope):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    recorded.add(id(target))
+                    bindings.setdefault(target.id, []).append(node.value)
+        elif isinstance(node, ast.AnnAssign):
+            if isinstance(node.target, ast.Name) and node.value is not None:
+                recorded.add(id(node.target))
+                bindings.setdefault(node.target.id, []).append(node.value)
+        elif isinstance(node, ast.AugAssign):
+            if isinstance(node.target, ast.Name):
+                recorded.add(id(node.target))
+                if isinstance(node.op, FLOAT_BIN_OPS):
+                    # ``f += <int>`` keeps a float a float, so the binding is
+                    # modelled as ``f <op> value`` with the name itself as
+                    # the other operand -- handled by the fixpoint below.
+                    bindings.setdefault(node.target.id, []).append(
+                        ast.BinOp(
+                            left=ast.Name(id=node.target.id, ctx=ast.Load()),
+                            op=node.op,
+                            right=node.value,
+                        )
+                    )
+                else:
+                    disqualified.add(node.target.id)
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, (ast.Store, ast.Del)) and id(node) not in recorded:
+                disqualified.add(node.id)
+        else:
+            disqualified.update(binding_names(node))
+
+    # Greatest fixpoint, exactly as in infer_int_names: assume every
+    # candidate is float, drop any whose binding is not float-valued under
+    # the current assumption.  A name proven int is never also float, so the
+    # two sets stay disjoint.
+    proven: set[str] = {
+        n for n in bindings if n not in disqualified and n not in ints
+    }
+    while True:
+        removed = False
+        for name in list(proven):
+            if not all(
+                is_float_expr(v, proven, ints, containers)
+                for v in bindings[name]
+            ):
+                proven.discard(name)
+                removed = True
+        if not removed:
+            break
+    return frozenset(proven)
+
+
+def hoistable_float_expr(node, floats, ints, containers) -> bool:
+    """Pure *and total* float expression: the LICM/CSE admission test for
+    floats.  Only ``+``/``-``/``*`` over proven floats/ints (overflow gives
+    ``inf``, never an exception); division needs a non-zero float/int
+    constant divisor so speculative evaluation can never raise."""
+    if isinstance(node, ast.Constant):
+        return type(node.value) in (int, float)
+    if isinstance(node, ast.Name):
+        return isinstance(node.ctx, ast.Load) and (
+            node.id in floats or node.id in ints
+        )
+    if is_len_call(node, containers):
+        return True
+    if isinstance(node, ast.UnaryOp):
+        return isinstance(node.op, FLOAT_UNARY_OPS) and hoistable_float_expr(
+            node.operand, floats, ints, containers
+        )
+    if isinstance(node, ast.BinOp):
+        if isinstance(node.op, FLOAT_TOTAL_OPS):
+            return hoistable_float_expr(
+                node.left, floats, ints, containers
+            ) and hoistable_float_expr(node.right, floats, ints, containers)
+        if isinstance(node.op, (ast.Div, ast.FloorDiv, ast.Mod)):
+            return (
+                hoistable_float_expr(node.left, floats, ints, containers)
+                and isinstance(node.right, ast.Constant)
+                and type(node.right.value) in (int, float)
+                and node.right.value != 0
+            )
+    return False
+
+
+def hoistable_num_expr(node, ints, floats, containers) -> bool:
+    """LICM/CSE admission test for numbers: an int expression by
+    :func:`hoistable_int_expr` *or* a float one by
+    :func:`hoistable_float_expr`.
+
+    The two name sets stay separate on purpose -- merging them would let an
+    int-only form such as ``F << 2`` (a ``TypeError`` on floats) pass, and
+    hoisting it before a zero-iteration loop would raise where the original
+    never even evaluated.
+    """
+    return hoistable_int_expr(node, ints, containers) or hoistable_float_expr(
+        node, floats, ints, containers
+    )
 
 
 def infer_int_names(

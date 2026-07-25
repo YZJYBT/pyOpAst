@@ -37,7 +37,8 @@ from ..analysis import (
     builtin_gate,
     contains_name,
     fresh_container_names,
-    hoistable_int_expr,
+    hoistable_num_expr,
+    infer_float_names,
     infer_int_names,
     is_len_call,
 )
@@ -64,8 +65,9 @@ def _worthy(node: ast.AST, containers) -> bool:
 class _Collector(ast.NodeVisitor):
     """Records maximal eligible expressions per statement index."""
 
-    def __init__(self, ints, containers) -> None:
+    def __init__(self, ints, floats, containers) -> None:
         self.ints = ints
+        self.floats = floats
         self.containers = containers
         self.table: dict[str, list[tuple[int, ast.AST]]] = {}
         self._idx = 0
@@ -83,7 +85,7 @@ class _Collector(ast.NodeVisitor):
     visit_ClassDef = _skip
 
     def _record(self, node: ast.AST) -> None:
-        if hoistable_int_expr(node, self.ints, self.containers) and _worthy(
+        if hoistable_num_expr(node, self.ints, self.floats, self.containers) and _worthy(
             node, self.containers
         ):
             self.table.setdefault(ast.dump(node), []).append((self._idx, node))
@@ -100,9 +102,10 @@ class _Replacer(ast.NodeTransformer):
     """Replaces selected maximal expressions with their temp names, using
     the same traversal shape as :class:`_Collector`."""
 
-    def __init__(self, active: dict[str, str], ints, containers, owner) -> None:
+    def __init__(self, active: dict[str, str], ints, floats, containers, owner) -> None:
         self.active = active
         self.ints = ints
+        self.floats = floats
         self.containers = containers
         self.owner = owner
 
@@ -159,16 +162,17 @@ class CommonSubexpressionElimination(ScopedTransformer):
         node = self.generic_visit(node)  # nested functions first
         containers = fresh_container_names(node) if self._len_ok else frozenset()
         ints = infer_int_names(node, containers, range_ok=self._range_ok)
-        if ints or containers:
-            node.body = self._process_block(node.body, set(), ints, containers)
+        floats = infer_float_names(node, ints=ints, containers=containers)
+        if ints or floats or containers:
+            node.body = self._process_block(node.body, set(), ints, floats, containers)
         return node
 
     visit_FunctionDef = _visit_function
     visit_AsyncFunctionDef = _visit_function
 
     # -- one block ----------------------------------------------------------
-    def _process_block(self, stmts, bound: set[str], ints, containers) -> list:
-        stmts = self._eliminate(stmts, bound, ints, containers)
+    def _process_block(self, stmts, bound: set[str], ints, floats, containers) -> list:
+        stmts = self._eliminate(stmts, bound, ints, floats, containers)
 
         # Recurse into nested blocks for expressions local to them.
         tracked = set(bound)
@@ -183,39 +187,39 @@ class CommonSubexpressionElimination(ScopedTransformer):
                         if isinstance(n, ast.Name)
                         and isinstance(n.ctx, ast.Store)
                     }
-                stmt.body = self._process_block(stmt.body, inner, ints, containers)
+                stmt.body = self._process_block(stmt.body, inner, ints, floats, containers)
             elif isinstance(stmt, ast.If):
-                stmt.body = self._process_block(stmt.body, tracked, ints, containers)
+                stmt.body = self._process_block(stmt.body, tracked, ints, floats, containers)
                 stmt.orelse = self._process_block(
-                    stmt.orelse, tracked, ints, containers
+                    stmt.orelse, tracked, ints, floats, containers
                 )
             elif isinstance(stmt, (ast.With, ast.AsyncWith)):
-                stmt.body = self._process_block(stmt.body, tracked, ints, containers)
+                stmt.body = self._process_block(stmt.body, tracked, ints, floats, containers)
             elif isinstance(stmt, ast.Try) or (
                 hasattr(ast, "TryStar") and isinstance(stmt, ast.TryStar)
             ):
-                stmt.body = self._process_block(stmt.body, tracked, ints, containers)
+                stmt.body = self._process_block(stmt.body, tracked, ints, floats, containers)
                 for handler in stmt.handlers:
                     handler.body = self._process_block(
-                        handler.body, tracked, ints, containers
+                        handler.body, tracked, ints, floats, containers
                     )
                 stmt.orelse = self._process_block(
-                    stmt.orelse, tracked, ints, containers
+                    stmt.orelse, tracked, ints, floats, containers
                 )
                 stmt.finalbody = self._process_block(
-                    stmt.finalbody, tracked, ints, containers
+                    stmt.finalbody, tracked, ints, floats, containers
                 )
             elif isinstance(stmt, ast.Match):
                 for case in stmt.cases:
                     case.body = self._process_block(
-                        case.body, tracked, ints, containers
+                        case.body, tracked, ints, floats, containers
                     )
             tracked |= definite_bindings(stmt)
             tracked -= unbound_risk_names(stmt)
         return stmts
 
-    def _eliminate(self, stmts, bound: set[str], ints, containers) -> list:
-        collector = _Collector(ints, containers)
+    def _eliminate(self, stmts, bound: set[str], ints, floats, containers) -> list:
+        collector = _Collector(ints, floats, containers)
         bound_at: list[set[str]] = []
         rebinds: list[set[str]] = []
         running = set(bound)
@@ -227,7 +231,7 @@ class CommonSubexpressionElimination(ScopedTransformer):
             running -= unbound_risk_names(stmt)
 
         selected: dict[str, tuple[int, str, ast.AST]] = {}
-        relevant = set(ints) | set(containers)
+        relevant = set(ints) | set(floats) | set(containers)
         for key, occurrences in collector.table.items():
             if len(occurrences) < 2:
                 continue
@@ -276,6 +280,6 @@ class CommonSubexpressionElimination(ScopedTransformer):
                 if first <= idx
             }
             if active:
-                stmt = _Replacer(active, ints, containers, self).visit(stmt)
+                stmt = _Replacer(active, ints, floats, containers, self).visit(stmt)
             out.append(stmt)
         return out

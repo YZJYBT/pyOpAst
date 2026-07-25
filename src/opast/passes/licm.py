@@ -42,7 +42,8 @@ from ..analysis import (
     builtin_gate,
     contains_name,
     fresh_container_names,
-    hoistable_int_expr,
+    hoistable_num_expr,
+    infer_float_names,
     infer_int_names,
 )
 from ..safety import region_is_dynamic, tree_has_dynamic
@@ -112,9 +113,10 @@ def container_gate(tree: ast.Module) -> bool:
 class _Hoister(ast.NodeTransformer):
     """Replaces maximal hoistable subexpressions with temp names."""
 
-    def __init__(self, ints: set[str], containers: set[str],
+    def __init__(self, ints: set[str], floats: set[str], containers: set[str],
                  owner: "LoopInvariantMotion") -> None:
         self.ints = ints
+        self.floats = floats
         self.containers = containers
         self.owner = owner
         self.temps: dict[str, tuple[str, ast.expr]] = {}
@@ -128,7 +130,9 @@ class _Hoister(ast.NodeTransformer):
     visit_ClassDef = _skip
 
     def _maybe_hoist(self, node: ast.AST) -> ast.AST:
-        if hoistable_int_expr(node, self.ints, self.containers) and contains_name(node):
+        if hoistable_num_expr(
+            node, self.ints, self.floats, self.containers
+        ) and contains_name(node):
             key = ast.dump(node)
             entry = self.temps.get(key)
             if entry is None:
@@ -176,20 +180,23 @@ class LoopInvariantMotion(ScopedTransformer):
         node = self.generic_visit(node)  # nested functions first
         containers = fresh_container_names(node) if self._len_ok else frozenset()
         ints = infer_int_names(node, containers, range_ok=self._range_ok)
-        if ints or containers:
-            node.body = self._process_block(node.body, set(), ints, containers)
+        floats = infer_float_names(node, ints=ints, containers=containers)
+        if ints or floats or containers:
+            node.body = self._process_block(
+                node.body, set(), ints, floats, containers
+            )
         return node
 
     visit_FunctionDef = _visit_function
     visit_AsyncFunctionDef = _visit_function
 
     # -- dominance-aware block walk ----------------------------------------
-    def _process_block(self, stmts, bound: set[str], ints, containers) -> list:
+    def _process_block(self, stmts, bound: set[str], ints, floats, containers) -> list:
         bound = set(bound)
         out = []
         for stmt in stmts:
             if isinstance(stmt, _LOOPS):
-                temps = self._hoist_loop(stmt, bound, ints, containers)
+                temps = self._hoist_loop(stmt, bound, ints, floats, containers)
                 out.extend(temps)
                 for t in temps:
                     bound.add(t.targets[0].id)
@@ -204,41 +211,42 @@ class LoopInvariantMotion(ScopedTransformer):
                         if isinstance(n, ast.Name)
                         and isinstance(n.ctx, ast.Store)
                     }
-                stmt.body = self._process_block(stmt.body, inner, ints, containers)
+                stmt.body = self._process_block(stmt.body, inner, ints, floats, containers)
             elif isinstance(stmt, ast.If):
-                stmt.body = self._process_block(stmt.body, bound, ints, containers)
-                stmt.orelse = self._process_block(stmt.orelse, bound, ints, containers)
+                stmt.body = self._process_block(stmt.body, bound, ints, floats, containers)
+                stmt.orelse = self._process_block(stmt.orelse, bound, ints, floats, containers)
             elif isinstance(stmt, (ast.With, ast.AsyncWith)):
-                stmt.body = self._process_block(stmt.body, bound, ints, containers)
+                stmt.body = self._process_block(stmt.body, bound, ints, floats, containers)
             elif isinstance(stmt, ast.Try) or (
                 hasattr(ast, "TryStar") and isinstance(stmt, ast.TryStar)
             ):
-                stmt.body = self._process_block(stmt.body, bound, ints, containers)
+                stmt.body = self._process_block(stmt.body, bound, ints, floats, containers)
                 for handler in stmt.handlers:
                     handler.body = self._process_block(
-                        handler.body, bound, ints, containers
+                        handler.body, bound, ints, floats, containers
                     )
-                stmt.orelse = self._process_block(stmt.orelse, bound, ints, containers)
+                stmt.orelse = self._process_block(stmt.orelse, bound, ints, floats, containers)
                 stmt.finalbody = self._process_block(
-                    stmt.finalbody, bound, ints, containers
+                    stmt.finalbody, bound, ints, floats, containers
                 )
             elif isinstance(stmt, ast.Match):
                 for case in stmt.cases:
-                    case.body = self._process_block(case.body, bound, ints, containers)
+                    case.body = self._process_block(case.body, bound, ints, floats, containers)
             out.append(stmt)
             bound |= definite_bindings(stmt)
             bound -= unbound_risk_names(stmt)
         return out
 
-    def _hoist_loop(self, loop, bound: set[str], ints, containers) -> list:
+    def _hoist_loop(self, loop, bound: set[str], ints, floats, containers) -> list:
         loop_bound = subtree_bindings(loop)
         avail_ints = {n for n in ints if n in bound and n not in loop_bound}
+        avail_floats = {n for n in floats if n in bound and n not in loop_bound}
         avail_containers = {
             n for n in containers if n in bound and n not in loop_bound
         }
-        if not avail_ints and not avail_containers:
+        if not avail_ints and not avail_floats and not avail_containers:
             return []
-        hoister = _Hoister(avail_ints, avail_containers, self)
+        hoister = _Hoister(avail_ints, avail_floats, avail_containers, self)
         if isinstance(loop, ast.While):
             loop.test = hoister.visit(loop.test)
         loop.body = [hoister.visit(s) for s in loop.body]
