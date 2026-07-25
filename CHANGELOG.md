@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.1.0 (2026-07-24)
 
 首个公开版本。包名 `opast`("OPtimizing AST",PyPI/import/CLI 三者一致);GitHub 仓库 pyOpAst。
 

@@ -2,7 +2,9 @@
 
 > **English** | [中文](README-ZH.md) (the Chinese document carries the exhaustive per-pass safety conditions; this one is the canonical overview)
 
-![CI](https://github.com/YZJYBT/pyOpAst/actions/workflows/ci.yml/badge.svg)
+[![CI](https://github.com/YZJYBT/pyOpAst/actions/workflows/ci.yml/badge.svg)](https://github.com/YZJYBT/pyOpAst/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/opast)](https://pypi.org/project/opast/)
+[![Python versions](https://img.shields.io/pypi/pyversions/opast)](https://pypi.org/project/opast/)
 
 **opast** ("OPtimizing AST") is a conservative AST-level source optimizer for Python. It rewrites your script into an equivalent but faster one and runs it on the very interpreter that invoked opast (plain CPython by default). Every transformation is backed by a static proof of semantic preservation; anything the optimizer cannot prove, it leaves alone.
 
