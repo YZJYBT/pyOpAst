@@ -23,6 +23,7 @@ from .passes import (
     LoopToComprehension,
     ModuleLoopOutlining,
     RangeToIteration,
+    TailRecursion,
     UnusedElimination,
 )
 
@@ -45,6 +46,10 @@ PASS_CLASSES = (
     LoopFolding,
     ConditionNarrowing,  # decides interval-provable tests; dead-code reaps
     DeadCodeElimination,
+    # After dead code (tail positions are clearer once unreachable returns
+    # are gone) and before the loop passes, which then optimise the loop it
+    # produces in the same iteration.
+    TailRecursion,
     # Before LICM/CSE: those hoist repeated ``len(x)`` into a temp, which
     # would destroy the ``range(len(x))`` shape this pass matches (algebra
     # stays earlier so index loops get their strength rewrites first).
@@ -79,6 +84,8 @@ AGGRESSIVE_NAMES = (
     "loop-state",
     "module-locals",
     "opt-imports",
+    "tail-calls",
+    "unbounded-recursion",
 )
 
 #: One line per aggressive option, printed by ``--report`` so the user can
@@ -109,6 +116,16 @@ AGGRESSIVE_ASSUMPTIONS = {
         "temporaries, not part of the module's API (refines loop-state)"
     ),
     "opt-imports": "optimized imported modules are not monkeypatched",
+    "tail-calls": (
+        "RecursionError from eliminated tail recursion is approximated by a "
+        "depth counter: it fires at a somewhat different depth and follows "
+        "sys.getrecursionlimit() rather than the interpreter's own stack"
+    ),
+    "unbounded-recursion": (
+        "eliminated tail recursion may run past the recursion limit instead "
+        "of raising RecursionError (drops the depth counter; refines "
+        "tail-calls)"
+    ),
 }
 
 #: Which passes act on each aggressive option -- used both to hand the
@@ -132,6 +149,8 @@ _AGGRESSIVE_CONSUMERS = {
     ),
     "module-locals": (ModuleLoopOutlining,),
     "loop-state": (ModuleLoopOutlining, LoopToComprehension),
+    "tail-calls": (TailRecursion,),
+    "unbounded-recursion": (TailRecursion,),
 }
 
 #: Options that merely *refine* another one and do nothing on their own.
@@ -139,7 +158,10 @@ _AGGRESSIVE_CONSUMERS = {
 #: and must therefore not be reported as a bet in play.  It deliberately
 #: does not imply its prerequisite: that would silently sign the user up for
 #: an assumption they did not ask for.
-_AGGRESSIVE_REQUIRES = {"module-locals": "loop-state"}
+_AGGRESSIVE_REQUIRES = {
+    "module-locals": "loop-state",
+    "unbounded-recursion": "tail-calls",
+}
 
 
 def normalize_aggressive(aggressive) -> frozenset[str]:
