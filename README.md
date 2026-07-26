@@ -47,7 +47,7 @@ The pipeline iterates to a fixpoint (default ≤ 8 rounds): de-dynamize → fold
 | `cse` | Merges repeated provably pure int/float expressions (same criteria as LICM) within a statement block into a temporary; speculative evaluation is sound because the expressions cannot raise. |
 | `unused` | Removes unused imports, unused module-level functions (post-inlining helpers), and dead local stores (effectful right-hand sides are downgraded to bare expressions). Module-level variable assignments are deliberately kept — module globals are observable API. |
 | `inline` | Two shapes: expression-body functions (`def f(...): return <expr>`) inline at any call site with constant/name arguments; straight-line statement bodies (≤ 6 assignments + `return`) inline at statement positions with arbitrary positional arguments via ordered temporaries. Requires module-wide name stability; the leftover `def` is cleaned by `unused`. |
-| `loop-to-comp` | `x = []` + an adjacent append-accumulation loop (nested `for`/guard-`if` chains allowed) becomes a list comprehension (`set()`/`.add` → set comprehension): dedicated `LIST_APPEND`/`SET_ADD` bytecode instead of a per-iteration attribute lookup + method call. Rejected inside `try`/`with` (a mid-loop exception would expose the partially-built list). |
+| `loop-to-comp` | `x = []` + an adjacent append-accumulation loop (nested `for`/guard-`if` chains allowed) becomes a list comprehension (`set()`/`.add` → set comprehension): dedicated `LIST_APPEND`/`SET_ADD` bytecode instead of a per-iteration attribute lookup + method call. Rejected inside `try`/`with` (a mid-loop exception would expose the partially-built list). **Module-level rewriting needs `--aggressive=loop-state`** — module globals outlive an escaping exception, so an outer `try` can tell a half-filled list from an assignment that never happened; inside a function that state dies with the frame. |
 | `comp-to-map` | `(f(x) for x in it)` → `map(f, it)`, with `filter` for guards, restricted to positions where the generator/`map` identity difference is unobservable and `f` is provably stable. |
 | `localize` | Per-iteration reads of stable globals/builtins inside loops become pre-loop locals (`LOAD_GLOBAL` → `LOAD_FAST`). Runs last so other passes claim names first. |
 
@@ -73,7 +73,40 @@ opast --aggressive --disable jit script.py    # all but one
 | `budgets` | Raises every "is this worth it" limit: loop-fold simulates up to 20M steps instead of 200k (about a second of optimization time), constants may fold to far larger literals, statement-body inlining accepts 24 assignments instead of 6 | **Nothing semantic** — only that longer optimization and bigger output are acceptable |
 | `fastmath` | Float rewrites that are not bit-exact: `F + 0` → `F`, `F ** 2` → `F * F` (~3x cheaper per operation), `F / c` → `F * (1/c)` for any constant | `-0.0` may become `0.0`; overflow may yield `inf` where `**` raised `OverflowError`; reciprocal multiplication may differ in the last ulp |
 | `jit` | The numba path described below | numba's int64 arithmetic does not wrap for your values |
+| `loop-state` | **Module-level loop outlining** (below), plus module-level `loop-to-comp` | When an exception escapes a module-level loop, the module's globals may hold their pre-loop values instead of partial results |
+| `module-locals` | Refines `loop-state`: loop counters and temporaries need no write-back, so loops with unknown trip counts become outlinable | Module-level names that nothing in the module reads are private temporaries, not API |
 | `opt-imports` | The import hook described above | Optimized imported modules are not monkeypatched |
+
+### Module-level loop outlining (`loop-state`)
+
+Module-level code compiles to `LOAD_NAME`/`STORE_NAME` — a chain of dict
+lookups — while the same code inside a function uses `LOAD_FAST`/`STORE_FAST`
+array slots. Measured on CPython 3.14, a top-level accumulator loop runs
+**about twice as fast** once moved into a function, which is why "put it in
+a function" is folklore advice. Scripts, opast's main target, routinely do
+all their work at module level, so this is the widest-reaching aggressive
+option:
+
+```python
+total = 0                          def _opast_outline_0(total):
+for i in range(1_000_000):             for i in range(1_000_000):
+    total = total + i * 2      ->          total = total + i * 2
+                                       return (total, i)
+                                   total = 0
+                                   (total, i) = _opast_outline_0(0)
+```
+
+The analysis is a per-iteration store-before-load scan: names written before
+being read are loop-local, names read while unwritten become parameters and
+must be definitely bound before the loop. A stored name that **any nested
+scope reads** rejects the outline outright — a function called from the body
+would otherwise observe the stale pre-loop value. Loops under `try`/`with`,
+or containing `def`/`class`/`import`/`global`/`yield`, are rejected too.
+
+The write-back happens once after the loop, which is exactly the assumption
+the option names: if an exception escapes, the globals keep their pre-loop
+values. That is invisible to a script that dies on the exception, and
+visible to anyone who wrapped the module in a `try` — hence opt-in.
 
 Note that `F / c` **is** rewritten by default when `c` is a power of two —
 the reciprocal is then exact, so `x / 4.0` → `x * 0.25` is bit-identical

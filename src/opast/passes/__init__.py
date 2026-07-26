@@ -13,6 +13,7 @@ from .licm import LoopInvariantMotion
 from .localize import GlobalLocalization
 from .loopfold import LoopFolding
 from .looptocomp import LoopToComprehension
+from .outline import ModuleLoopOutlining
 from .propagate import ConstantPropagation
 from .rangeiter import RangeToIteration
 from .unused import UnusedElimination
@@ -33,5 +34,6 @@ __all__ = [
     "RangeToIteration",
     "LoopToComprehension",
     "ComprehensionToMap",
+    "ModuleLoopOutlining",
     "GlobalLocalization",
 ]

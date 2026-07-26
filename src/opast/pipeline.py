@@ -21,6 +21,7 @@ from .passes import (
     LoopFolding,
     LoopInvariantMotion,
     LoopToComprehension,
+    ModuleLoopOutlining,
     RangeToIteration,
     UnusedElimination,
 )
@@ -54,6 +55,10 @@ PASS_CLASSES = (
     FunctionInlining,
     LoopToComprehension,  # picks up range-to-iter output in the same pass
     ComprehensionToMap,
+    # Late: every other pass gets to work on the loop while it is still a
+    # plain module-level statement, and the function it lands in is not a
+    # candidate for the function-scope passes until the next iteration.
+    ModuleLoopOutlining,
     GlobalLocalization,  # last: inline/comp-to-map get first claim on names
 )
 
@@ -66,7 +71,15 @@ DEFAULT_MAX_ITERATIONS = 8
 #: Opt-in *aggressive* options.  Everything outside this set is backed by a
 #: static proof; each name here instead rests on an assumption the user
 #: accepts by enabling it (reported by ``--report``).
-AGGRESSIVE_NAMES = ("annotations", "budgets", "fastmath", "jit", "opt-imports")
+AGGRESSIVE_NAMES = (
+    "annotations",
+    "budgets",
+    "fastmath",
+    "jit",
+    "loop-state",
+    "module-locals",
+    "opt-imports",
+)
 
 #: One line per aggressive option, printed by ``--report`` so the user can
 #: see exactly which bets are in play.
@@ -87,6 +100,14 @@ AGGRESSIVE_ASSUMPTIONS = {
         "multiplication may differ in the last ulp"
     ),
     "jit": "numba int64 arithmetic does not wrap for these values",
+    "loop-state": (
+        "when an exception escapes a module-level loop, the module's globals "
+        "may hold their pre-loop values instead of partial results"
+    ),
+    "module-locals": (
+        "module-level names that nothing in the module reads are private "
+        "temporaries, not part of the module's API (refines loop-state)"
+    ),
     "opt-imports": "optimized imported modules are not monkeypatched",
 }
 
@@ -107,8 +128,18 @@ _AGGRESSIVE_CONSUMERS = {
         AlgebraicSimplification,
         LoopFolding,
         FunctionInlining,
+        ModuleLoopOutlining,
     ),
+    "module-locals": (ModuleLoopOutlining,),
+    "loop-state": (ModuleLoopOutlining, LoopToComprehension),
 }
+
+#: Options that merely *refine* another one and do nothing on their own.
+#: Enabling such an option alone is not an error -- it simply has no effect,
+#: and must therefore not be reported as a bet in play.  It deliberately
+#: does not imply its prerequisite: that would silently sign the user up for
+#: an assumption they did not ask for.
+_AGGRESSIVE_REQUIRES = {"module-locals": "loop-state"}
 
 
 def normalize_aggressive(aggressive) -> frozenset[str]:
@@ -230,6 +261,12 @@ def optimize_ast(
         name
         for name, consumers in _AGGRESSIVE_CONSUMERS.items()
         if name in aggressive and any(cls in consumers for cls in active)
+    }
+    # A refining option is only in play once the option it refines is.
+    in_play -= {
+        name
+        for name, required in _AGGRESSIVE_REQUIRES.items()
+        if required not in in_play
     }
     if jit:
         in_play.add("jit")

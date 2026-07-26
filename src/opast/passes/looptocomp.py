@@ -101,7 +101,17 @@ class LoopToComprehension(ScopedTransformer):
         return self.visit(tree)
 
     def visit_Module(self, node: ast.Module) -> ast.AST:
-        node.body = self._process_block(node.body, node, guarded=False)
+        # At module level the accumulator is a global, so an exception
+        # escaping the loop leaves an *observable* difference: the statement
+        # form has a partially filled list, the comprehension form never
+        # performed the assignment at all.  Whoever wrapped the module's
+        # execution in a ``try`` (``exec``, or ``import`` under a handler)
+        # can see that, so module-level rewriting is opt-in.  Inside a
+        # function the same state dies with the frame -- reaching it needs
+        # traceback introspection, which the dynamic gate already forbids.
+        node.body = self._process_block(
+            node.body, node, guarded="loop-state" not in self.aggressive
+        )
         return self.generic_visit(node)
 
     def _visit_function(self, node: ast.AST) -> ast.AST:
