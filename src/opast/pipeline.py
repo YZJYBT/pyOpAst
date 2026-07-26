@@ -63,6 +63,50 @@ PASS_NAMES = tuple(cls.name for cls in PASS_CLASSES)
 
 DEFAULT_MAX_ITERATIONS = 8
 
+#: Opt-in *aggressive* options.  Everything outside this set is backed by a
+#: static proof; each name here instead rests on an assumption the user
+#: accepts by enabling it (reported by ``--report``).
+AGGRESSIVE_NAMES = ("annotations", "jit", "opt-imports")
+
+#: One line per aggressive option, printed by ``--report`` so the user can
+#: see exactly which bets are in play.
+AGGRESSIVE_ASSUMPTIONS = {
+    "annotations": (
+        "parameter/return annotations reflect runtime types "
+        "(and no bool is passed where int is annotated)"
+    ),
+    "jit": "numba int64 arithmetic does not wrap for these values",
+    "opt-imports": "optimized imported modules are not monkeypatched",
+}
+
+#: Passes whose analyses can consume trusted annotations.
+_ANNOTATION_CONSUMERS = (
+    AlgebraicSimplification,
+    ConditionNarrowing,
+    LoopInvariantMotion,
+    CommonSubexpressionElimination,
+)
+
+
+def normalize_aggressive(aggressive) -> frozenset[str]:
+    """Accept True/None (meaning *all*), an iterable, or a comma-separated
+    string; reject unknown names loudly."""
+    if aggressive is None or aggressive is False:
+        return frozenset()
+    if aggressive is True:
+        return frozenset(AGGRESSIVE_NAMES)
+    if isinstance(aggressive, str):
+        names = [part.strip() for part in aggressive.split(",") if part.strip()]
+    else:
+        names = list(aggressive)
+    unknown = sorted(set(names) - set(AGGRESSIVE_NAMES))
+    if unknown:
+        raise ValueError(
+            f"unknown aggressive option(s): {', '.join(unknown)} "
+            f"(valid: {', '.join(AGGRESSIVE_NAMES)})"
+        )
+    return frozenset(names)
+
 
 def _normalize_disable(disable) -> frozenset[str]:
     """Accept an iterable of pass names or one comma-separated string;
@@ -93,6 +137,7 @@ class PassStats:
 class OptimizationReport:
     per_pass: dict[str, PassStats] = field(default_factory=dict)
     iterations: int = 0
+    aggressive: frozenset = field(default_factory=frozenset)
 
     def record(self, pass_) -> None:
         stats = self.per_pass.setdefault(pass_.name, PassStats())
@@ -104,9 +149,15 @@ class OptimizationReport:
         return sum(s.changes for s in self.per_pass.values())
 
     def summary(self) -> str:
-        lines = [
+        lines = []
+        if self.aggressive:
+            enabled = sorted(self.aggressive)
+            lines.append(f"aggressive: {', '.join(enabled)}")
+            for name in enabled:
+                lines.append(f"  assuming: {AGGRESSIVE_ASSUMPTIONS[name]}")
+        lines.append(
             f"opast: {self.total_changes} change(s) in {self.iterations} iteration(s)"
-        ]
+        )
         for name, stats in self.per_pass.items():
             line = f"  {name}: {stats.changes} change(s)"
             if stats.skipped_scopes:
@@ -131,16 +182,36 @@ def optimize_ast(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     jit: bool = False,
     disable=(),
+    aggressive=(),
 ) -> tuple[ast.Module, OptimizationReport]:
     """Optimise *tree* in place-ish (the returned tree should be used).
 
     *disable* skips passes by name -- an iterable or a comma-separated
     string of :data:`PASS_NAMES` entries (``"jit"`` is also accepted and
     overrides the *jit* flag).  Unknown names raise :class:`ValueError`.
+
+    *aggressive* opts into assumption-backed optimisation: ``True`` for all
+    of :data:`AGGRESSIVE_NAMES`, or a subset (iterable or comma-separated
+    string).  ``"jit"`` there is equivalent to the *jit* flag; *disable*
+    still wins over both.
     """
     disabled = _normalize_disable(disable)
+    aggressive = normalize_aggressive(aggressive)
+    jit = (jit or "jit" in aggressive) and "jit" not in disabled
     active = [cls for cls in PASS_CLASSES if cls.name not in disabled]
-    report = OptimizationReport()
+    # An assumption is only worth reporting when something actually acts on
+    # it: ``--disable`` can switch off the jit pass or every annotation
+    # consumer, and ``opt-imports`` is the caller's business, not the
+    # pipeline's (the CLI adds that line when it installs the hook).
+    trust = "annotations" in aggressive and any(
+        cls in _ANNOTATION_CONSUMERS for cls in active
+    )
+    in_play = set()
+    if jit:
+        in_play.add("jit")
+    if trust:
+        in_play.add("annotations")
+    report = OptimizationReport(aggressive=frozenset(in_play))
     for iteration in range(max_iterations):
         iteration_changes = 0
         for pass_class in active:
@@ -148,7 +219,9 @@ def optimize_ast(
             if pass_class is GlobalLocalization:
                 # Under --jit, keep numba-whitelist builtins as globals so
                 # jit candidates still pass numba's typing.
-                pass_.jit_mode = jit and "jit" not in disabled
+                pass_.jit_mode = jit
+            elif trust and pass_class in _ANNOTATION_CONSUMERS:
+                pass_.trust_annotations = True
             tree = pass_.run(tree)
             report.record(pass_)
             iteration_changes += pass_.changes
@@ -156,7 +229,7 @@ def optimize_ast(
         report.iterations = iteration + 1
         if not iteration_changes:
             break
-    if jit and "jit" not in disabled:
+    if jit:
         # One-shot, after the fixpoint: decorates hot numeric functions with
         # opast.jitsupport.maybe_njit (opt-in, see README caveats).
         from .passes.jit import JitInjection
@@ -174,10 +247,15 @@ def optimize_source(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     jit: bool = False,
     disable=(),
+    aggressive=(),
 ) -> OptimizationResult:
     tree = ast.parse(source, filename=filename)
     tree, report = optimize_ast(
-        tree, max_iterations=max_iterations, jit=jit, disable=disable
+        tree,
+        max_iterations=max_iterations,
+        jit=jit,
+        disable=disable,
+        aggressive=aggressive,
     )
     return OptimizationResult(tree=tree, report=report, filename=filename)
 
@@ -187,6 +265,7 @@ def optimize_file(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     jit: bool = False,
     disable=(),
+    aggressive=(),
 ) -> OptimizationResult:
     path = Path(path)
     with tokenize.open(path) as fh:  # honours PEP 263 encoding cookies
@@ -197,4 +276,5 @@ def optimize_file(
         max_iterations=max_iterations,
         jit=jit,
         disable=disable,
+        aggressive=aggressive,
     )

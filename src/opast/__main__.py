@@ -9,8 +9,10 @@ import sys
 from pathlib import Path
 
 from .pipeline import (
+    AGGRESSIVE_NAMES,
     DEFAULT_MAX_ITERATIONS,
     PASS_NAMES,
+    normalize_aggressive,
     optimize_file,
     optimize_source,
 )
@@ -44,6 +46,15 @@ def main(argv: list[str] | None = None) -> int:
                              "(optional dependency 'opast[jit]'; any numba "
                              "failure falls back to plain Python at runtime; "
                              "see README for the int64 caveat)")
+    parser.add_argument("--aggressive", "-O3", nargs="?", const=True,
+                        default=None, metavar="OPTIONS",
+                        help="enable assumption-backed optimization; bare "
+                             "flag turns on all of: "
+                             + ", ".join(AGGRESSIVE_NAMES)
+                             + ". Pass a comma-separated subset to pick. "
+                               "Unlike the default passes these are not "
+                               "proof-backed -- --report lists what each "
+                               "one assumes")
     parser.add_argument("--disable", metavar="PASSES", default="",
                         help="comma-separated pass names to skip: "
                              + ", ".join((*PASS_NAMES, "jit")))
@@ -71,16 +82,28 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("a script path is required (or use -c CODE)")
 
     try:
+        aggressive = normalize_aggressive(ns.aggressive)
+    except ValueError as exc:
+        parser.error(str(exc))
+    # The umbrella flag also turns on the two options that live outside the
+    # pass pipeline; the dedicated flags keep working on their own.
+    ns.jit = ns.jit or "jit" in aggressive
+    ns.opt_imports = ns.opt_imports or "opt-imports" in aggressive
+    # The import hook is a run-time affair; its assumption only applies when
+    # the hook is actually installed (the pipeline reports the rest).
+    hook_planned = not ns.no_run and (ns.opt_imports or ns.opt_imports_under)
+
+    try:
         if ns.code is not None:
             result = optimize_source(
                 ns.code, filename="<string>",
                 max_iterations=ns.max_iterations, jit=ns.jit,
-                disable=ns.disable,
+                disable=ns.disable, aggressive=aggressive,
             )
         else:
             result = optimize_file(
                 ns.script, max_iterations=ns.max_iterations, jit=ns.jit,
-                disable=ns.disable,
+                disable=ns.disable, aggressive=aggressive,
             )
     except ValueError as exc:  # unknown --disable pass name
         parser.error(str(exc))
@@ -99,6 +122,8 @@ def main(argv: list[str] | None = None) -> int:
     if ns.output:
         Path(ns.output).write_text(result.source + "\n", encoding="utf-8")
     if ns.report:
+        if hook_planned and "opt-imports" in aggressive:
+            result.report.aggressive |= {"opt-imports"}
         print(result.report.summary(), file=sys.stderr)
     if not ns.no_run:
         finder = None
@@ -117,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 jit=ns.jit,
                 disable=ns.disable,
                 report=ns.report,
+                aggressive=aggressive,
             )
         try:
             if ns.code is not None:

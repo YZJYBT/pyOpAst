@@ -95,12 +95,16 @@ def run_path(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     jit: bool = False,
     disable=(),
+    aggressive=(),
 ) -> OptimizationResult:
     """Optimise the script at *path* and run it. Returns the result.
 
-    *disable* skips passes by name (see :data:`opast.PASS_NAMES`)."""
+    *disable* skips passes by name (see :data:`opast.PASS_NAMES`);
+    *aggressive* opts into assumption-backed options (see
+    :data:`opast.AGGRESSIVE_NAMES`)."""
     result = optimize_file(
-        path, max_iterations=max_iterations, jit=jit, disable=disable
+        path, max_iterations=max_iterations, jit=jit, disable=disable,
+        aggressive=aggressive,
     )
     execute(result, argv, write_source=jit)
     return result
@@ -113,13 +117,16 @@ def run_source(
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     jit: bool = False,
     disable=(),
+    aggressive=(),
 ) -> OptimizationResult:
     """Optimise *source* and run it. Returns the result.
 
-    *disable* skips passes by name (see :data:`opast.PASS_NAMES`)."""
+    *disable* skips passes by name (see :data:`opast.PASS_NAMES`);
+    *aggressive* opts into assumption-backed options (see
+    :data:`opast.AGGRESSIVE_NAMES`)."""
     result = optimize_source(
         source, filename=filename, max_iterations=max_iterations, jit=jit,
-        disable=disable,
+        disable=disable, aggressive=aggressive,
     )
     execute(result, argv, write_source=jit)
     return result

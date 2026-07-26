@@ -42,6 +42,7 @@ from IPython.core.error import UsageError
 from IPython.core.magic import Magics, cell_magic, magics_class
 
 from .pipeline import (
+    AGGRESSIVE_NAMES,
     DEFAULT_MAX_ITERATIONS,
     PASS_NAMES,
     OptimizationResult,
@@ -65,6 +66,11 @@ class OpastMagics(Magics):
     @magic_arguments.argument("--jit", action="store_true",
                               help="numba-accelerate hot numeric code "
                                    "(opt-in; see README for the int64 caveat)")
+    @magic_arguments.argument("--aggressive", nargs="?", const=True,
+                              default=None, metavar="OPTIONS",
+                              help="assumption-backed optimization; bare flag "
+                                   "enables all of "
+                                   + ", ".join(AGGRESSIVE_NAMES))
     @magic_arguments.argument("--disable", default="", metavar="PASSES",
                               help="comma-separated pass names to skip: "
                                    + ", ".join((*PASS_NAMES, "jit")))
@@ -103,6 +109,7 @@ class OpastMagics(Magics):
                 max_iterations=args.max_iterations,
                 jit=args.jit,
                 disable=args.disable,
+                aggressive=args.aggressive,
             )
         except ValueError as exc:  # unknown --disable pass name
             raise UsageError(str(exc)) from None

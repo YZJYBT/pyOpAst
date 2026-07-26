@@ -18,6 +18,7 @@ to-codex.ps1
 to-claude.ps1
 start-bridge.cmd
 start-bridge-remote.cmd
+deploy-bridge.cmd
 bridge-tools/
 .bridge-socket.txt
 .bridge-target.txt

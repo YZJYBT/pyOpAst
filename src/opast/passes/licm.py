@@ -37,6 +37,7 @@ import ast
 
 from ..analysis import (
     LEN_GATE_NAMES,
+    AnnotationTrust,
     all_bound_names,
     binding_names,
     builtin_gate,
@@ -45,6 +46,7 @@ from ..analysis import (
     hoistable_num_expr,
     infer_float_names,
     infer_int_names,
+    param_names,
 )
 from ..safety import region_is_dynamic, tree_has_dynamic
 from .base import ScopedTransformer
@@ -155,6 +157,9 @@ class LoopInvariantMotion(ScopedTransformer):
             return tree
         self._len_ok = container_gate(tree)
         self._range_ok = builtin_gate(tree, "range")
+        self._trust = AnnotationTrust(
+            tree if getattr(self, "trust_annotations", False) else None
+        )
         self._counter = 0
         for n in ast.walk(tree):
             ident = None
@@ -179,11 +184,26 @@ class LoopInvariantMotion(ScopedTransformer):
             return node
         node = self.generic_visit(node)  # nested functions first
         containers = fresh_container_names(node) if self._len_ok else frozenset()
-        ints = infer_int_names(node, containers, range_ok=self._range_ok)
-        floats = infer_float_names(node, ints=ints, containers=containers)
+        ints = infer_int_names(
+            node,
+            containers,
+            range_ok=self._range_ok,
+            trusted=self._trust.ints(node),
+            typed_calls=self._trust.int_returns,
+        )
+        floats = infer_float_names(
+            node,
+            ints=ints,
+            containers=containers,
+            trusted=self._trust.floats(node),
+            typed_calls=self._trust.float_returns,
+        )
         if ints or floats or containers:
+            # Parameters are bound on entry -- the dominance scan has to
+            # start with them, or nothing involving a parameter is ever
+            # "definitely bound before the loop".
             node.body = self._process_block(
-                node.body, set(), ints, floats, containers
+                node.body, set(param_names(node)), ints, floats, containers
             )
         return node
 

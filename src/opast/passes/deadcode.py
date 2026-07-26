@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import ast
 
+from ..analysis import param_names
 from ..safety import region_is_dynamic
 from .base import ScopedTransformer
+from .licm import definite_bindings, unbound_risk_names
 
 _TERMINAL = (ast.Return, ast.Raise, ast.Break, ast.Continue)
 
@@ -39,6 +41,13 @@ def _is_terminal(stmt: ast.stmt) -> bool:
 class DeadCodeElimination(ScopedTransformer):
     name = "dead-code"
 
+    def __init__(self) -> None:
+        super().__init__()
+        #: Parameters of the scope being processed -- bound on entry, so a
+        #: bare mention of one is removable (see _process).
+        self._scope_params: frozenset[str] = frozenset()
+        self._settled: set[str] = set()
+
     def run(self, tree: ast.Module) -> ast.Module:
         if region_is_dynamic(tree):
             self.skipped_scopes += 1
@@ -51,7 +60,13 @@ class DeadCodeElimination(ScopedTransformer):
         if region_is_dynamic(node):
             self.skipped_scopes += 1
             return node
-        node.body = self._process(node.body, docstring=True)
+        outer, self._scope_params = self._scope_params, param_names(node)
+        outer_settled, self._settled = self._settled, set()
+        try:
+            node.body = self._process(node.body, docstring=True)
+        finally:
+            self._scope_params = outer
+            self._settled = outer_settled
         return node
 
     visit_FunctionDef = _visit_scope
@@ -126,31 +141,50 @@ class DeadCodeElimination(ScopedTransformer):
 
     # -- block processing -------------------------------------------------
     def _process(self, stmts, docstring: bool = False, ensure: bool = True):
-        visited: list[ast.stmt] = []
-        for stmt in stmts:
-            result = self.visit(stmt)
-            if result is None:
-                continue
-            if isinstance(result, list):
-                visited.extend(result)
-            else:
-                visited.append(result)
-
+        # ``_settled`` tracks names definitely bound at this point.  It is
+        # inherited by nested blocks (bindings before a loop hold inside it)
+        # and restored on the way out, so an ``except``/``finally`` block
+        # never inherits bindings made in the ``try`` body -- those may not
+        # have executed.
+        saved = self._settled
+        self._settled = set(saved) | set(self._scope_params)
         out: list[ast.stmt] = []
         terminated = False
-        for i, stmt in enumerate(visited):
+        for i, stmt in enumerate(stmts):
             if terminated:
                 self.changes += 1
                 continue
-            if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
-                if docstring and i == 0 and isinstance(stmt.value.value, str):
-                    out.append(stmt)
-                    continue
-                self.changes += 1
+            result = self.visit(stmt)
+            if result is None:
                 continue
-            out.append(stmt)
-            if _is_terminal(stmt):
-                terminated = True
+            for produced in result if isinstance(result, list) else [result]:
+                if isinstance(produced, ast.Expr) and isinstance(
+                    produced.value, ast.Constant
+                ):
+                    if docstring and i == 0 and isinstance(produced.value.value, str):
+                        out.append(produced)
+                        continue
+                    self.changes += 1
+                    continue
+                if (
+                    isinstance(produced, ast.Expr)
+                    and isinstance(produced.value, ast.Name)
+                    and isinstance(produced.value.ctx, ast.Load)
+                    and produced.value.id in self._settled
+                ):
+                    # ``x`` alone, x provably bound: loading a bound name has
+                    # no side effect and cannot raise, so the statement is
+                    # dead.  Unbound names must keep raising, hence the
+                    # dominance check -- the unused pass downgrades dead
+                    # stores to exactly this shape (e.g. once copy
+                    # propagation ate the last read of a hoisted temporary).
+                    self.changes += 1
+                    continue
+                self._settled |= definite_bindings(produced)
+                self._settled -= unbound_risk_names(produced)
+                out.append(produced)
+                if _is_terminal(produced):
+                    terminated = True
 
         if len(out) > 1:
             without_pass = [s for s in out if not isinstance(s, ast.Pass)]
@@ -164,4 +198,5 @@ class DeadCodeElimination(ScopedTransformer):
 
         if not out and ensure:
             out = [ast.Pass()]
+        self._settled = saved
         return out

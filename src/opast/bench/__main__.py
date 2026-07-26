@@ -58,13 +58,15 @@ def run_once(code):
     return elapsed, globs.get("RESULT", _MISSING)
 
 
-def bench_one(path: Path, repeat: int, jit: bool = False) -> dict:
+def bench_one(path: Path, repeat: int, jit: bool = False, aggressive=()) -> dict:
     source = path.read_text(encoding="utf-8")
     filename = str(path)
 
     code_original = compile(source, filename, "exec")
     start = time.perf_counter()
-    optimized = optimize_source(source, filename=filename, jit=jit)
+    optimized = optimize_source(
+        source, filename=filename, jit=jit, aggressive=aggressive
+    )
     optimize_cost = time.perf_counter() - start
     # With --jit numba retrieves function sources via inspect (co_filename),
     # so compile against a materialized copy -- same as runner.execute().
@@ -109,6 +111,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--jit", action="store_true",
                         help="run the jit pass too (requires numba; the "
                              "warmup run absorbs import + compile cost)")
+    parser.add_argument("--aggressive", nargs="?", const=True, default=None,
+                        metavar="OPTIONS",
+                        help="enable assumption-backed optimization (bare "
+                             "flag = all; see the main CLI)")
     parser.add_argument("--list", action="store_true",
                         help="list built-in workloads and exit")
     ns = parser.parse_args(argv)
@@ -123,7 +129,8 @@ def main(argv: list[str] | None = None) -> int:
     paths = discover(ns.workloads)
     print(f"Python {sys.version.split()[0]} | {len(paths)} workload(s) | "
           f"best of {ns.repeat} run(s) per variant"
-          f"{' | jit' if ns.jit else ''}\n")
+          f"{' | jit' if ns.jit else ''}"
+          f"{' | aggressive' if ns.aggressive else ''}\n")
 
     header = (f"{'workload':<12} {'original':>10} {'optimized':>10} "
               f"{'speedup':>8} {'opt-cost':>9} {'changes':>8}  result")
@@ -133,7 +140,9 @@ def main(argv: list[str] | None = None) -> int:
     rows = []
     all_match = True
     for path in paths:
-        row = bench_one(path, ns.repeat, jit=ns.jit)
+        row = bench_one(
+            path, ns.repeat, jit=ns.jit, aggressive=ns.aggressive or ()
+        )
         rows.append(row)
         all_match &= row["results_match"]
         print(

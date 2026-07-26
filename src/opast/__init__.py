@@ -23,6 +23,7 @@ string of pass names (see :data:`PASS_NAMES`, plus ``"jit"``) to skip::
 """
 
 from .pipeline import (
+    AGGRESSIVE_NAMES,
     DEFAULT_MAX_ITERATIONS,
     PASS_NAMES,
     OptimizationReport,
@@ -45,6 +46,7 @@ def load_ipython_extension(ipython) -> None:
 __version__ = "0.1.0"
 
 __all__ = [
+    "AGGRESSIVE_NAMES",
     "DEFAULT_MAX_ITERATIONS",
     "PASS_NAMES",
     "OptimizationReport",

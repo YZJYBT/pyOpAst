@@ -51,6 +51,7 @@ import ast
 import copy
 
 from ..analysis import (
+    AnnotationTrust,
     builtin_gate,
     infer_float_names,
     infer_int_names,
@@ -115,17 +116,35 @@ class AlgebraicSimplification(ScopedTransformer):
             return tree
         self._range_ok = builtin_gate(tree, "range")
         self._abs_ok = builtin_gate(tree, "abs")
+        self._trust = AnnotationTrust(
+            tree if getattr(self, "trust_annotations", False) else None
+        )
         return self.visit(tree)
 
     def _visit_function(self, node: ast.AST) -> ast.AST:
         if region_is_dynamic(node):
             self.skipped_scopes += 1
             return node
-        proven = infer_int_names(node, range_ok=self._range_ok)
+        trusted_ints = self._trust.ints(node)
+        proven = infer_int_names(
+            node,
+            range_ok=self._range_ok,
+            trusted=trusted_ints,
+            typed_calls=self._trust.int_returns,
+        )
         self._proven.append(proven)
-        self._floats.append(infer_float_names(node, ints=proven))
+        self._floats.append(
+            infer_float_names(
+                node,
+                ints=proven,
+                trusted=self._trust.floats(node),
+                typed_calls=self._trust.float_returns,
+            )
+        )
         self._ranges.append(
-            infer_int_ranges(node, proven, range_ok=self._range_ok)
+            infer_int_ranges(
+                node, proven, range_ok=self._range_ok, trusted=trusted_ints
+            )
         )
         try:
             return self.generic_visit(node)
@@ -174,7 +193,14 @@ class AlgebraicSimplification(ScopedTransformer):
                     replacement = left
                 elif _num_const(left, 1) and self._is_float(right):
                     replacement = right
-            elif isinstance(op, ast.Div) and _num_const(right, 1):
+            elif (
+                isinstance(op, ast.Div)
+                and _num_const(right, 1)
+                # PEP 484 lets an ``int`` argument satisfy a ``float``
+                # annotation, and ``5 / 1`` is ``5.0`` while ``5`` is not --
+                # so this identity is off whenever annotations are trusted.
+                and not self._trust.enabled
+            ):
                 if self._is_float(left):
                     replacement = left
             elif isinstance(op, ast.Pow) and _num_const(right, 1):

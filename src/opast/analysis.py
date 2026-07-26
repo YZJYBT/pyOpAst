@@ -127,6 +127,12 @@ def _own_params(scope: ast.AST) -> set[str]:
     return names
 
 
+def param_names(scope: ast.AST) -> frozenset[str]:
+    """Parameter names of *scope* -- definitely bound on function entry, so
+    dominance scans must start with them already in scope."""
+    return frozenset(_own_params(scope))
+
+
 def bound_names(scope: ast.AST) -> frozenset[str]:
     """Over-approximation of every name bound anywhere in *scope*'s region
     (including its own parameters).  Used for shadowing checks."""
@@ -342,6 +348,112 @@ def is_int_expr(
     return False
 
 
+# -- annotation trust (aggressive option "annotations") ----------------------
+#
+# Parameters are normally never provably typed: a caller may pass Decimal,
+# ndarray, a subclass...  Under the opt-in aggressive option the optimizer
+# takes ``def f(n: int, dt: float)`` at its word.  Two documented bets come
+# with it: annotations are unenforced at runtime, and the typing conventions
+# are looser than our analysis (``bool`` is an ``int`` subclass; PEP 484
+# explicitly allows an ``int`` argument where ``float`` is annotated -- the
+# algebraic pass compensates for the latter by dropping ``F / 1``).
+
+
+def _is_annotation(node, kind: str) -> bool:
+    """A bare ``int``/``float`` annotation, plain or quoted.  Anything
+    composite (``Optional[int]``, ``int | None``, ``list[int]``) is not."""
+    if isinstance(node, ast.Name):
+        return node.id == kind
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value.strip() == kind
+    return False
+
+
+def annotated_params(scope: ast.AST, kind: str) -> frozenset[str]:
+    """Parameters of *scope* annotated exactly *kind*.
+
+    ``*args``/``**kwargs`` are excluded on purpose: ``def f(*args: int)``
+    annotates the *elements*, while the name itself is a tuple/dict.
+    """
+    if not isinstance(
+        scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+    ):
+        return frozenset()
+    args = scope.args
+    return frozenset(
+        a.arg
+        for a in [*args.posonlyargs, *args.args, *args.kwonlyargs]
+        if _is_annotation(a.annotation, kind)
+    )
+
+
+def annotated_returns(tree: ast.Module, kind: str) -> frozenset[str]:
+    """Module-level functions with a bare ``-> kind`` annotation that are
+    bound exactly once and never declared ``global`` -- so a call to one of
+    them can be trusted to produce *kind*."""
+    counts: "Counter[str]" = Counter()
+    for n in iter_region(tree):
+        counts.update(binding_names(n))
+    declared: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Global):
+            declared.update(n.names)
+    return frozenset(
+        stmt.name
+        for stmt in tree.body
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and _is_annotation(stmt.returns, kind)
+        and counts.get(stmt.name, 0) == 1
+        and stmt.name not in declared
+    )
+
+
+class AnnotationTrust:
+    """Module-wide annotation facts; every accessor is empty when the
+    aggressive option is off, so consumers need no conditionals.
+
+    Trusting an annotation that names ``int``/``float`` also requires those
+    builtins to be unshadowed module-wide -- otherwise the annotation refers
+    to whatever the module rebound them to.
+    """
+
+    __slots__ = ("enabled", "int_returns", "float_returns")
+
+    def __init__(self, tree: ast.Module | None = None) -> None:
+        self.enabled = False
+        self.int_returns: frozenset[str] = frozenset()
+        self.float_returns: frozenset[str] = frozenset()
+        if tree is None:
+            return
+        if not (builtin_gate(tree, "int") and builtin_gate(tree, "float")):
+            return
+        self.enabled = True
+        self.int_returns = annotated_returns(tree, "int")
+        self.float_returns = annotated_returns(tree, "float")
+
+    def ints(self, scope: ast.AST) -> frozenset[str]:
+        return annotated_params(scope, "int") if self.enabled else frozenset()
+
+    def floats(self, scope: ast.AST) -> frozenset[str]:
+        return annotated_params(scope, "float") if self.enabled else frozenset()
+
+
+def is_typed_call(node: ast.AST, typed: frozenset[str] | set[str]) -> bool:
+    """``g()`` where *g* is a function whose return annotation is trusted.
+
+    Only ever consulted when *typing* a binding -- never by the hoistability
+    predicates, because a call's purity is a separate question the
+    annotation says nothing about.
+    """
+    return (
+        bool(typed)
+        and isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in typed
+        and not any(isinstance(a, ast.Starred) for a in node.args)
+    )
+
+
 def is_float_expr(
     node: ast.AST,
     floats: frozenset[str] | set[str],
@@ -393,6 +505,8 @@ def infer_float_names(
     scope: ast.AST,
     ints: frozenset[str] | set[str] = frozenset(),
     containers: frozenset[str] | set[str] = frozenset(),
+    trusted: frozenset[str] | set[str] = frozenset(),
+    typed_calls: frozenset[str] | set[str] = frozenset(),
 ) -> frozenset[str]:
     """Names local to *scope* whose every binding provably produces a plain
     ``float``.  Mirrors :func:`infer_int_names` (same greatest-fixpoint
@@ -400,8 +514,10 @@ def infer_float_names(
     proven plain ``int`` in the same scope, which may feed mixed arithmetic.
     """
     bindings: dict[str, list[ast.AST]] = {}
-    disqualified: set[str] = set(_own_params(scope))
+    disqualified: set[str] = set(_own_params(scope)) - set(trusted)
     recorded: set[int] = set()
+    for name in trusted:
+        bindings.setdefault(name, [])  # float by annotation, whatever it holds
 
     for node in iter_region(scope):
         if isinstance(node, ast.Assign):
@@ -447,6 +563,7 @@ def infer_float_names(
         for name in list(proven):
             if not all(
                 is_float_expr(v, proven, ints, containers)
+                or is_typed_call(v, typed_calls)
                 for v in bindings[name]
             ):
                 proven.discard(name)
@@ -507,6 +624,8 @@ def infer_int_names(
     scope: ast.AST,
     containers: frozenset[str] | set[str] = frozenset(),
     range_ok: bool = False,
+    trusted: frozenset[str] | set[str] = frozenset(),
+    typed_calls: frozenset[str] | set[str] = frozenset(),
 ) -> frozenset[str]:
     """Names local to *scope* whose every binding provably produces a plain
     ``int`` (``len()`` of a name in *containers* counts as int).
@@ -519,8 +638,10 @@ def infer_int_names(
     bound.
     """
     bindings: dict[str, list[ast.AST]] = {}
-    disqualified: set[str] = set(_own_params(scope))
+    disqualified: set[str] = set(_own_params(scope)) - set(trusted)
     recorded: set[int] = set()  # id() of Name nodes that are handled targets
+    for name in trusted:
+        bindings.setdefault(name, [])  # int by annotation, whatever it holds
 
     for node in iter_region(scope):
         if range_ok and (rng := for_range_binding(node)) is not None:
@@ -561,7 +682,10 @@ def infer_int_names(
     while True:
         removed = False
         for name in list(proven):
-            if not all(is_int_expr(v, proven, containers) for v in bindings[name]):
+            if not all(
+                is_int_expr(v, proven, containers) or is_typed_call(v, typed_calls)
+                for v in bindings[name]
+            ):
                 proven.discard(name)
                 removed = True
         if not removed:
@@ -712,6 +836,7 @@ def infer_int_ranges(
     proven: frozenset[str] | set[str],
     containers: frozenset[str] | set[str] = frozenset(),
     range_ok: bool = False,
+    trusted: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, tuple | None]:
     """Interval for every name in *proven* (which must come from
     :func:`infer_int_names` on the same scope with the same options).
@@ -742,7 +867,12 @@ def infer_int_ranges(
             if isinstance(node.target, ast.Name) and node.target.id in bindings:
                 bindings[node.target.id].append(("aug", node.op, node.value))
 
-    ranges: dict[str, tuple | None] = {n: None for n in proven}
+    # A name trusted purely by annotation has no binding to derive bounds
+    # from: it starts unbounded rather than bottom, so branch conditions can
+    # narrow it (a guard clause is exactly this case).
+    ranges: dict[str, tuple | None] = {
+        n: (_TOP if n in trusted else None) for n in proven
+    }
     sweeps = 0
     while True:
         sweeps += 1

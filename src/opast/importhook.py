@@ -43,7 +43,12 @@ from dataclasses import dataclass
 from importlib.machinery import PathFinder, SourceFileLoader
 from pathlib import Path
 
-from .pipeline import DEFAULT_MAX_ITERATIONS, _normalize_disable, optimize_source
+from .pipeline import (
+    DEFAULT_MAX_ITERATIONS,
+    _normalize_disable,
+    normalize_aggressive,
+    optimize_source,
+)
 
 _CACHE_DIR = Path(tempfile.gettempdir()) / "opast-imports"
 
@@ -59,6 +64,7 @@ class _HookOptions:
     disable: tuple[str, ...]
     report: bool
     no_cache: bool
+    aggressive: tuple[str, ...] = ()
 
 
 class OpastLoader(SourceFileLoader):
@@ -78,6 +84,7 @@ class OpastLoader(SourceFileLoader):
                 str(opts.max_iterations),
                 str(opts.jit),
                 ",".join(opts.disable),
+                ",".join(opts.aggressive),
             )
         )
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
@@ -98,6 +105,7 @@ class OpastLoader(SourceFileLoader):
                     max_iterations=opts.max_iterations,
                     jit=opts.jit,
                     disable=opts.disable,
+                    aggressive=opts.aggressive,
                 )
             except Exception as exc:  # never break an import
                 print(
@@ -171,6 +179,7 @@ def install(
     jit: bool = False,
     disable=(),
     report: bool = False,
+    aggressive=(),
 ) -> OpastFinder:
     """Install the import hook for modules under *roots* (directories).
     Returns the finder; pass it to :func:`uninstall` to remove."""
@@ -185,6 +194,7 @@ def install(
         disable=tuple(sorted(disabled)),
         report=report,
         no_cache=bool(os.environ.get("OPAST_NO_IMPORT_CACHE")),
+        aggressive=tuple(sorted(normalize_aggressive(aggressive))),
     )
     finder = OpastFinder(roots, options)
     sys.meta_path.insert(0, finder)

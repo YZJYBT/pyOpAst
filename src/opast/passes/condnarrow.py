@@ -47,6 +47,7 @@ from ..analysis import (
     INT_BIN_OPS,
     NEG_INF,
     POS_INF,
+    AnnotationTrust,
     _binop_range,
     builtin_gate,
     fresh_container_names,
@@ -193,6 +194,9 @@ class ConditionNarrowing:
             return tree
         self._len_ok = container_gate(tree)
         self._range_ok = builtin_gate(tree, "range")
+        self._trust = AnnotationTrust(
+            tree if getattr(self, "trust_annotations", False) else None
+        )
         self._visit(tree)
         return tree
 
@@ -210,11 +214,22 @@ class ConditionNarrowing:
         for child in ast.iter_child_nodes(node):
             self._visit(child)  # nested scopes handled independently
         containers = fresh_container_names(node) if self._len_ok else frozenset()
-        ints = infer_int_names(node, containers, range_ok=self._range_ok)
+        trusted = self._trust.ints(node)
+        ints = infer_int_names(
+            node,
+            containers,
+            range_ok=self._range_ok,
+            trusted=trusted,
+            typed_calls=self._trust.int_returns,
+        )
         if not ints and not containers:
             return
         base = infer_int_ranges(
-            node, ints, containers, range_ok=self._range_ok
+            node,
+            ints,
+            containers,
+            range_ok=self._range_ok,
+            trusted=trusted,
         )
         self._base = base
         self._ints = ints
@@ -287,6 +302,7 @@ class ConditionNarrowing:
     # -- block walk ---------------------------------------------------------
     def _walk_block(self, stmts: list, env: dict) -> None:
         for i, stmt in enumerate(stmts):
+            pending_fact = None
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef,
                                  ast.ClassDef)):
                 self._reset(env, subtree_bindings(stmt))
@@ -297,6 +313,16 @@ class ConditionNarrowing:
                 else_env = self._apply_fact(env, stmt.test, False)
                 self._walk_block(stmt.body, body_env)
                 self._walk_block(stmt.orelse, else_env)
+                # Guard clause: when one branch always leaves the block,
+                # reaching the code below proves the *other* side held.
+                fell_through = None
+                if _always_exits(stmt.body) and not _always_exits(stmt.orelse):
+                    fell_through = False
+                elif _always_exits(stmt.orelse) and not _always_exits(stmt.body):
+                    fell_through = True
+                if fell_through is not None:
+                    # Applied after the reset below, so it survives it.
+                    pending_fact = (stmt.test, fell_through)
             elif isinstance(stmt, _LOOPS):
                 # The body may run after earlier iterations rebound names.
                 inner = dict(env)
@@ -331,6 +357,8 @@ class ConditionNarrowing:
             transferred = self._transfer(stmt, env)
             self._reset(env, subtree_bindings(stmt))
             env.update(transferred)
+            if pending_fact is not None:
+                self._apply_into(env, pending_fact[0], pending_fact[1])
 
     def _transfer(self, stmt: ast.stmt, env: dict) -> dict:
         if (
@@ -356,6 +384,20 @@ class ConditionNarrowing:
             if new is not None:
                 return {stmt.target.id: new}
         return {}
+
+
+def _always_exits(stmts) -> bool:
+    """True if control can never fall out of the bottom of *stmts* (the
+    block ends in return/raise/break/continue, or in an ``if`` whose two
+    sides both always exit)."""
+    if not stmts:
+        return False
+    last = stmts[-1]
+    if isinstance(last, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+        return True
+    if isinstance(last, ast.If):
+        return _always_exits(last.body) and _always_exits(last.orelse)
+    return False
 
 
 def _mirror(op):

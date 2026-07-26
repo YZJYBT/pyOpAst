@@ -25,7 +25,7 @@ opast --disable inline,licm script.py         # skip passes by name
 
 Three principles drive every pass:
 
-1. **Prove, then rewrite.** Passes only fire on facts established by static analysis: per-function *proven-int* type inference (a greatest-fixpoint over all bindings), interval (value-range) analysis with widening, escape analysis for *fresh containers* (built locally, never leaked, never mutated), straight-line dominance scans for definite binding, and module-wide stability checks for names (bound exactly once, never `global`-declared, no dynamic constructs anywhere).
+1. **Prove, then rewrite.** By default every pass fires only on facts established by static analysis — no assumption about your program is required. (Assumption-backed optimization exists, but lives behind the opt-in [`--aggressive`](#aggressive-mode-opt-in---aggressive---o3) tier, which states each assumption it makes.) The facts come from: per-function *proven-int* type inference (a greatest-fixpoint over all bindings), interval (value-range) analysis with widening, escape analysis for *fresh containers* (built locally, never leaked, never mutated), straight-line dominance scans for definite binding, and module-wide stability checks for names (bound exactly once, never `global`-declared, no dynamic constructs anywhere).
 2. **Dynamic code disables optimization, scope by scope.** Any appearance of `eval` / `exec` / `globals` / `locals` / `vars` / `compile` / `__import__` / frame-introspection attributes / `from m import *` taints the enclosing scope; tainted scopes (and everything nested inside) are skipped entirely. A tainted module top level disables the whole file. The check is name-based and deliberately over-conservative.
 3. **Zero runtime overhead.** The static passes emit ordinary Python source — no guards, no helper runtime. The only runtime machinery lives behind the opt-in `--jit` flag, and it degrades to plain Python on any failure.
 
@@ -40,7 +40,7 @@ The pipeline iterates to a fixpoint (default ≤ 8 rounds): de-dynamize → fold
 | `const-prop` | Substitutes constants for variables along four routes: single-binding names (whole scope), **cross-scope** module constants into later-defined functions, **span propagation** for multiply-bound names (from an assignment up to the first statement that could rebind), and **copy propagation** `y = x` between plain locals (function scopes only). |
 | `algebraic` | Identity cleanup (`x+0`, `x*1`, `-(-x)`, …) plus strength reduction — `E % 2**k → E & mask`, `E // 2**k → E >> k`, `E ** 2 → E * E` — and interval-analysis-backed `abs(E) → E` for provably non-negative `E`. Proven-`float` expressions get only the **bit-exact** identities (`F - 0`, `F * 1`, `F / 1`, `F ** 1`, `+F`, `-(-F)`); `F + 0` and `F // 1` are deliberately excluded because they change `-0.0` and floor respectively. Never duplicates or drops effects. |
 | `loop-fold` | **Closed-form loop evaluation**: a `for i in range(<const>)` loop whose body is pure int arithmetic (no calls) is simulated exactly at optimization time and replaced by its final constant assignments. Step and magnitude budgets; any simulated exception keeps the loop. A successful fold proves the loop cannot raise, so it is legal even inside `try`/`with`. |
-| `cond-narrow` | Decides comparisons between proven-`int` expressions whose intervals settle the outcome and replaces them with `True`/`False` for `dead-code` to reap — `if i < 0:` inside `for i in range(n)` disappears. Combines the flow-insensitive base intervals with **path-sensitive narrowing** (inside `if c:` the condition holds, so `if k > 10: ... if k > 5:` decides the inner test) and straight-line assignment transfer. Sound by construction: any name a statement binds is reset to its base interval afterwards, and entering a loop body resets everything the loop rebinds before applying the test as a fact. Only pure int expressions are folded, so no side effect can be removed. |
+| `cond-narrow` | Decides comparisons between proven-`int` expressions whose intervals settle the outcome and replaces them with `True`/`False` for `dead-code` to reap; **guard clauses** count too — when an `if` body always exits, the negated condition holds for everything below it, so `if n <= 0: return` establishes `n >= 1` — `if i < 0:` inside `for i in range(n)` disappears. Combines the flow-insensitive base intervals with **path-sensitive narrowing** (inside `if c:` the condition holds, so `if k > 10: ... if k > 5:` decides the inner test) and straight-line assignment transfer. Sound by construction: any name a statement binds is reset to its base interval afterwards, and entering a loop body resets everything the loop rebinds before applying the test as a fact. Only pure int expressions are folded, so no side effect can be removed. |
 | `dead-code` | Unreachable statements after `return`/`raise`/`break`/`continue`, constant-condition `if`/`while` (with `else` semantics), `assert True`, useless constant expression statements, redundant `pass`. |
 | `range-to-iter` | `for i in range(len(x))` over a provably fresh *sequence* becomes `for v in x` (index dead) or `for i, v in enumerate(x)` (index live); per-iteration `BINARY_SUBSCR` lookups disappear. Only exact `x[i]` loads are replaced; the enumerate form keeps `x` and `i` bound, so leftovers stay correct. |
 | `licm` | Hoists provably pure-and-total loop-invariant int **and float** expressions (plus `len()` of fresh containers) out of loop bodies and `while` tests into pre-loop temporaries, with dominance-checked definite binding. Float admits `+`/`-`/`*` (overflow yields `inf`, never raises) and division by a non-zero constant; `**` is excluded (`(-8.0) ** 0.5` is complex), and the int/float name sets stay separate so int-only forms like `F << 2` cannot slip through. |
@@ -52,6 +52,62 @@ The pipeline iterates to a fixpoint (default ≤ 8 rounds): de-dynamize → fold
 | `localize` | Per-iteration reads of stable globals/builtins inside loops become pre-loop locals (`LOAD_GLOBAL` → `LOAD_FAST`). Runs last so other passes claim names first. |
 
 LICM/CSE additionally support **`len()` caching for fresh containers** — sound only because escape analysis guarantees no reference ever leaves the function, so no call can mutate the container.
+
+## Aggressive mode (opt-in): `--aggressive` / `-O3`
+
+Everything above is proof-backed: no assumption about your program is
+required. Aggressive mode is the second tier — each option buys extra
+optimization by resting on **one stated assumption**, and `--report` prints
+exactly which bets are in play.
+
+```powershell
+opast --aggressive script.py                  # everything below
+opast -O3 script.py                           # same thing
+opast --aggressive=annotations script.py      # pick a subset
+opast --aggressive --disable jit script.py    # all but one
+```
+
+| Option | What it buys | What it assumes |
+| --- | --- | --- |
+| `annotations` | Parameters and call results annotated `int`/`float` become typed, which unblocks strength reduction, LICM/CSE hoisting and interval narrowing across the function boundary | Annotations reflect runtime types; no `bool` where `int` is annotated (identities only) |
+| `jit` | The numba path described below | numba's int64 arithmetic does not wrap for your values |
+| `opt-imports` | The import hook described above | Optimized imported modules are not monkeypatched |
+
+**Why `annotations` matters most**: a parameter is normally *never* provably
+typed — a caller may pass `Decimal`, a numpy array or a subclass — so the
+type-driven passes stop at the function boundary. Annotations lift that:
+
+```python
+def integrate(steps: int, dt: float) -> float:      # default: nothing fires
+    x, v, g = 0.0, 1.5, 9.81
+    for i in range(steps):
+        a = g * dt * dt
+        v = v + g * dt
+        x = x + v * dt + a
+    return x
+```
+```python
+def integrate(steps: int, dt: float) -> float:      # --aggressive=annotations
+    x, v = 0.0, 1.5
+    _opast_cse_0 = 9.81 * dt                        # hoisted out of the loop
+    _opast_inv_0 = _opast_cse_0 * dt
+    for i in range(steps):
+        v = v + _opast_cse_0
+        x = x + v * dt + _opast_inv_0
+    return x
+```
+
+Two conventions make annotations looser than the analysis needs, and both are
+handled rather than assumed away: `bool` is a subclass of `int` (so it only
+affects the algebraic identities, never hoisting or narrowing), and PEP 484
+explicitly allows an `int` argument where `float` is annotated (so the
+`F / 1` identity is switched off whenever annotations are trusted). Only bare
+`int`/`float` annotations count — `Optional[int]`, `int | None`, `list[int]`
+and friends are ignored, as are `*args`/`**kwargs` annotations (they describe
+the elements, not the parameter). Return annotations are trusted only for
+module-level functions bound exactly once and never declared `global`, and
+they only *type* a value: a call is still never hoisted, because purity is a
+separate question an annotation says nothing about.
 
 ## Importing modules through the optimizer (`--opt-imports`)
 
@@ -86,7 +142,7 @@ total
 
 Options mirror the CLI; the cell executes in the user namespace, so assignments persist. Analyses are cell-scoped — see README-ZH for the notebook caveats.
 
-## Experimental: `--jit` (numba, off by default)
+## Experimental: `--jit` (numba, off by default; part of `--aggressive`)
 
 ```powershell
 pip install opast[jit]
