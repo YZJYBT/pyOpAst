@@ -66,7 +66,7 @@ DEFAULT_MAX_ITERATIONS = 8
 #: Opt-in *aggressive* options.  Everything outside this set is backed by a
 #: static proof; each name here instead rests on an assumption the user
 #: accepts by enabling it (reported by ``--report``).
-AGGRESSIVE_NAMES = ("annotations", "jit", "opt-imports")
+AGGRESSIVE_NAMES = ("annotations", "budgets", "fastmath", "jit", "opt-imports")
 
 #: One line per aggressive option, printed by ``--report`` so the user can
 #: see exactly which bets are in play.
@@ -75,17 +75,40 @@ AGGRESSIVE_ASSUMPTIONS = {
         "parameter/return annotations reflect runtime types "
         "(and no bool is passed where int is annotated)"
     ),
+    # Not a semantic bet -- a resource one, kept here so one flag covers
+    # every "you asked for it" knob.
+    "budgets": (
+        "longer optimization time and bigger emitted literals/code are "
+        "acceptable (no semantic change)"
+    ),
+    "fastmath": (
+        "float rewrites need not be bit-exact: -0.0 may become 0.0, "
+        "overflow may yield inf instead of OverflowError, and reciprocal "
+        "multiplication may differ in the last ulp"
+    ),
     "jit": "numba int64 arithmetic does not wrap for these values",
     "opt-imports": "optimized imported modules are not monkeypatched",
 }
 
-#: Passes whose analyses can consume trusted annotations.
-_ANNOTATION_CONSUMERS = (
-    AlgebraicSimplification,
-    ConditionNarrowing,
-    LoopInvariantMotion,
-    CommonSubexpressionElimination,
-)
+#: Which passes act on each aggressive option -- used both to hand the
+#: option down and to decide whether it is worth reporting (an option whose
+#: every consumer was ``--disable``d is not in play).
+_AGGRESSIVE_CONSUMERS = {
+    "annotations": (
+        AlgebraicSimplification,
+        ConditionNarrowing,
+        LoopInvariantMotion,
+        CommonSubexpressionElimination,
+    ),
+    "fastmath": (AlgebraicSimplification,),
+    "budgets": (
+        ConstantFolding,
+        ConstantPropagation,
+        AlgebraicSimplification,
+        LoopFolding,
+        FunctionInlining,
+    ),
+}
 
 
 def normalize_aggressive(aggressive) -> frozenset[str]:
@@ -200,17 +223,16 @@ def optimize_ast(
     jit = (jit or "jit" in aggressive) and "jit" not in disabled
     active = [cls for cls in PASS_CLASSES if cls.name not in disabled]
     # An assumption is only worth reporting when something actually acts on
-    # it: ``--disable`` can switch off the jit pass or every annotation
+    # it: ``--disable`` can switch off the jit pass or an option's every
     # consumer, and ``opt-imports`` is the caller's business, not the
     # pipeline's (the CLI adds that line when it installs the hook).
-    trust = "annotations" in aggressive and any(
-        cls in _ANNOTATION_CONSUMERS for cls in active
-    )
-    in_play = set()
+    in_play = {
+        name
+        for name, consumers in _AGGRESSIVE_CONSUMERS.items()
+        if name in aggressive and any(cls in consumers for cls in active)
+    }
     if jit:
         in_play.add("jit")
-    if trust:
-        in_play.add("annotations")
     report = OptimizationReport(aggressive=frozenset(in_play))
     for iteration in range(max_iterations):
         iteration_changes = 0
@@ -220,8 +242,12 @@ def optimize_ast(
                 # Under --jit, keep numba-whitelist builtins as globals so
                 # jit candidates still pass numba's typing.
                 pass_.jit_mode = jit
-            elif trust and pass_class in _ANNOTATION_CONSUMERS:
-                pass_.trust_annotations = True
+            # Each pass picks the options it understands out of the set.
+            pass_.aggressive = frozenset(
+                name
+                for name, consumers in _AGGRESSIVE_CONSUMERS.items()
+                if name in aggressive and pass_class in consumers
+            )
             tree = pass_.run(tree)
             report.record(pass_)
             iteration_changes += pass_.changes

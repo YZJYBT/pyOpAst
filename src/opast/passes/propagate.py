@@ -79,6 +79,9 @@ from .base import ScopedTransformer
 
 _PROPAGATE_TYPES = (int, float, complex, bool, str, bytes, type(None), type(...))
 _MAX_SEQ = 128
+#: With the aggressive ``budgets`` option, duplicating longer string/bytes
+#: constants into their use sites is considered worth the source growth.
+_GENEROUS_SEQ = 8192
 
 
 def _direct_nested_scopes(node: ast.AST):
@@ -247,6 +250,10 @@ class _NameSubstituter(ast.NodeTransformer):
 class ConstantPropagation(ScopedTransformer):
     name = "const-prop"
 
+    @property
+    def _max_seq(self) -> int:
+        return _GENEROUS_SEQ if "budgets" in self.aggressive else _MAX_SEQ
+
     def run(self, tree: ast.Module) -> ast.Module:
         if region_is_dynamic(tree):
             self.skipped_scopes += 1
@@ -331,7 +338,7 @@ class ConstantPropagation(ScopedTransformer):
             for name, value in _constant_pairs(stmt):
                 if type(value.value) not in _PROPAGATE_TYPES:
                     continue
-                if isinstance(value.value, (str, bytes)) and len(value.value) > _MAX_SEQ:
+                if isinstance(value.value, (str, bytes)) and len(value.value) > self._max_seq:
                     continue
                 if counts[name] != 1:
                     continue
@@ -452,7 +459,7 @@ class ConstantPropagation(ScopedTransformer):
                     continue
                 if (
                     isinstance(const.value, (str, bytes))
-                    and len(const.value) > _MAX_SEQ
+                    and len(const.value) > self._max_seq
                 ):
                     continue
                 consts[name] = const

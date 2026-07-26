@@ -66,6 +66,8 @@ _FORBIDDEN_IN_EXPR = (
 
 #: Maximum number of body assignments for a statement-body candidate.
 _STMT_BODY_MAX = 6
+#: The aggressive ``budgets`` option trades source size for more inlining.
+_GENEROUS_STMT_BODY_MAX = 24
 
 _TEMP_PREFIX = "_opast_in"
 
@@ -103,7 +105,7 @@ def _simple_body_expr(func: ast.FunctionDef):
     return None
 
 
-def _stmt_body(func: ast.FunctionDef):
+def _stmt_body(func: ast.FunctionDef, budget: int = _STMT_BODY_MAX):
     """``([(target, value), ...], return_expr)`` for a straight-line body of
     single-target name assignments ending in ``return <expr>``, else None."""
     body = list(func.body)
@@ -114,7 +116,7 @@ def _stmt_body(func: ast.FunctionDef):
         and isinstance(body[0].value.value, str)
     ):
         body = body[1:]  # docstring
-    if not 2 <= len(body) <= _STMT_BODY_MAX + 1:
+    if not 2 <= len(body) <= budget + 1:
         return None
     *assign_stmts, last = body
     if not isinstance(last, ast.Return) or last.value is None:
@@ -160,7 +162,7 @@ def _scan_body_names(exprs_in_order, params):
     return frozenset(free), dict(usage)
 
 
-def _collect_candidates(module: ast.Module):
+def _collect_candidates(module: ast.Module, stmt_budget: int = _STMT_BODY_MAX):
     module_bindings = Counter()
     for node in iter_region(module):
         module_bindings.update(binding_names(node))
@@ -210,7 +212,7 @@ def _collect_candidates(module: ast.Module):
             )
             continue
 
-        pairs_ret = _stmt_body(stmt)
+        pairs_ret = _stmt_body(stmt, stmt_budget)
         if pairs_ret is None:
             continue
         pairs, ret = pairs_ret
@@ -257,7 +259,12 @@ class FunctionInlining(ScopedTransformer):
         if tree_has_dynamic(tree):
             self.skipped_scopes += 1
             return tree
-        self._candidates, self._stmt_candidates = _collect_candidates(tree)
+        self._candidates, self._stmt_candidates = _collect_candidates(
+            tree,
+            _GENEROUS_STMT_BODY_MAX
+            if "budgets" in self.aggressive
+            else _STMT_BODY_MAX,
+        )
         if not self._candidates and not self._stmt_candidates:
             return tree
         self._candidate_nodes = {

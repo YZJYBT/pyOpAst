@@ -13,10 +13,24 @@ import operator
 
 from .base import ScopedTransformer
 
-_MAX_SEQ_LEN = 4096
-_MAX_POW_EXP = 64
-_MAX_SHIFT = 256
-_MAX_INT_BITS = 4096
+#: Guardrails on optimisation-time work and emitted literal size.  The
+#: aggressive ``budgets`` option swaps in the generous set: nothing about
+#: the *semantics* changes, only how much folding is considered worthwhile
+#: (bigger literals in the output, more work at optimise time).
+class _Limits:
+    __slots__ = ("seq_len", "pow_exp", "shift", "int_bits")
+
+    def __init__(self, seq_len, pow_exp, shift, int_bits) -> None:
+        self.seq_len = seq_len
+        self.pow_exp = pow_exp
+        self.shift = shift
+        self.int_bits = int_bits
+
+
+DEFAULT_LIMITS = _Limits(seq_len=4096, pow_exp=64, shift=256, int_bits=4096)
+GENEROUS_LIMITS = _Limits(
+    seq_len=1 << 20, pow_exp=4096, shift=1 << 16, int_bits=1 << 20
+)
 
 _SKIP = object()
 
@@ -62,33 +76,33 @@ def _foldable(node: ast.AST) -> bool:
     return isinstance(node, ast.Constant) and type(node.value) in _FOLDABLE_TYPES
 
 
-def _check_result(value):
+def _check_result(value, limits=DEFAULT_LIMITS):
     if type(value) not in _FOLDABLE_TYPES:
         return _SKIP
-    if isinstance(value, (str, bytes)) and len(value) > _MAX_SEQ_LEN:
+    if isinstance(value, (str, bytes)) and len(value) > limits.seq_len:
         return _SKIP
-    if type(value) is int and value.bit_length() > _MAX_INT_BITS:
+    if type(value) is int and value.bit_length() > limits.int_bits:
         return _SKIP
     return value
 
 
-def _fold_binop(op: ast.operator, left, right):
+def _fold_binop(op: ast.operator, left, right, limits=DEFAULT_LIMITS):
     # Pre-guards against expressions that are cheap to write but expensive
     # to evaluate (they must not hang or exhaust memory at optimise time).
     if isinstance(op, ast.Pow):
-        if type(right) is int and abs(right) > _MAX_POW_EXP:
+        if type(right) is int and abs(right) > limits.pow_exp:
             return _SKIP
         if type(left) is int and type(right) is int and right > 0:
-            if left.bit_length() * right > _MAX_INT_BITS:
+            if left.bit_length() * right > limits.int_bits:
                 return _SKIP
-    if isinstance(op, ast.LShift) and type(right) is int and right > _MAX_SHIFT:
+    if isinstance(op, ast.LShift) and type(right) is int and right > limits.shift:
         return _SKIP
     if isinstance(op, ast.Mult):
         if isinstance(left, (str, bytes)) and type(right) is int:
-            if len(left) * max(right, 0) > _MAX_SEQ_LEN:
+            if len(left) * max(right, 0) > limits.seq_len:
                 return _SKIP
         if isinstance(right, (str, bytes)) and type(left) is int:
-            if len(right) * max(left, 0) > _MAX_SEQ_LEN:
+            if len(right) * max(left, 0) > limits.seq_len:
                 return _SKIP
     fn = _BIN_OPS.get(type(op))
     if fn is None:
@@ -97,11 +111,17 @@ def _fold_binop(op: ast.operator, left, right):
         value = fn(left, right)
     except Exception:
         return _SKIP
-    return _check_result(value)
+    return _check_result(value, limits)
 
 
 class ConstantFolding(ScopedTransformer):
     name = "constant-folding"
+
+    @property
+    def _limits(self):
+        return (
+            GENEROUS_LIMITS if "budgets" in self.aggressive else DEFAULT_LIMITS
+        )
 
     def _const(self, value, node: ast.AST) -> ast.Constant:
         self.changes += 1
@@ -110,7 +130,9 @@ class ConstantFolding(ScopedTransformer):
     def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
         node = self.generic_visit(node)
         if _foldable(node.left) and _foldable(node.right):
-            value = _fold_binop(node.op, node.left.value, node.right.value)
+            value = _fold_binop(
+                node.op, node.left.value, node.right.value, self._limits
+            )
             if value is not _SKIP:
                 return self._const(value, node)
         return node
@@ -129,7 +151,7 @@ class ConstantFolding(ScopedTransformer):
                     value = fn(operand.value)
                 except Exception:
                     return node
-                value = _check_result(value)
+                value = _check_result(value, self._limits)
                 if value is not _SKIP:
                     return self._const(value, node)
         return node

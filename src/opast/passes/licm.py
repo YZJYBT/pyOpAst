@@ -158,7 +158,7 @@ class LoopInvariantMotion(ScopedTransformer):
         self._len_ok = container_gate(tree)
         self._range_ok = builtin_gate(tree, "range")
         self._trust = AnnotationTrust(
-            tree if getattr(self, "trust_annotations", False) else None
+            tree if "annotations" in self.aggressive else None
         )
         self._counter = 0
         for n in ast.walk(tree):

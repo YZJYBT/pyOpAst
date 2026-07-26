@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import math
 
 from ..analysis import (
     AnnotationTrust,
@@ -65,6 +66,47 @@ from .base import ScopedTransformer
 
 #: Node-count budget for the ``E ** 2 -> E * E`` duplication.
 _POW_DUP_MAX_NODES = 5
+_GENEROUS_POW_DUP_MAX_NODES = 24
+
+#: Smallest positive normal double: a reciprocal at or below this loses the
+#: exactness that makes the division-to-multiplication rewrite bit-safe.
+_MIN_NORMAL = 2.2250738585072014e-308
+
+
+def _as_float_constant(node: ast.AST):
+    """The value of a non-zero, finite numeric constant as a float, or None.
+
+    An ``int`` literal too large for a double (``10 ** 400``) raises
+    ``OverflowError`` on conversion -- the runtime raises there too, so the
+    rewrite is simply declined and the original division kept.
+    """
+    if not (isinstance(node, ast.Constant) and type(node.value) in (int, float)):
+        return None
+    try:
+        value = float(node.value)
+    except OverflowError:
+        return None
+    if not math.isfinite(value) or value == 0.0:
+        return None
+    return value
+
+
+def _exact_reciprocal(node: ast.AST):
+    """``1/c`` when *c* is a constant for which ``x / c`` and ``x * (1/c)``
+    are **bit-identical** for every finite ``x`` -- that is, a power of two
+    whose reciprocal is still a normal double.  Verified empirically over
+    subnormals, huge values and signed zeros.  Non-powers of two only agree
+    to within an ulp, so they are left to the ``fastmath`` option."""
+    value = _as_float_constant(node)
+    if value is None:
+        return None
+    mantissa, _ = math.frexp(value)
+    if abs(mantissa) != 0.5:  # not a power of two
+        return None
+    recip = 1.0 / value
+    if not math.isfinite(recip) or abs(recip) < _MIN_NORMAL:
+        return None
+    return recip
 
 
 def _int_const(node: ast.AST, value: int) -> bool:
@@ -117,7 +159,7 @@ class AlgebraicSimplification(ScopedTransformer):
         self._range_ok = builtin_gate(tree, "range")
         self._abs_ok = builtin_gate(tree, "abs")
         self._trust = AnnotationTrust(
-            tree if getattr(self, "trust_annotations", False) else None
+            tree if "annotations" in self.aggressive else None
         )
         return self.visit(tree)
 
@@ -176,6 +218,52 @@ class AlgebraicSimplification(ScopedTransformer):
     def _is_float(self, node: ast.AST) -> bool:
         return is_float_expr(node, self._floats[-1], self._proven[-1])
 
+    @property
+    def _fast_math(self) -> bool:
+        return "fastmath" in self.aggressive
+
+    @property
+    def _pow_dup_budget(self) -> int:
+        return (
+            _GENEROUS_POW_DUP_MAX_NODES
+            if "budgets" in self.aggressive
+            else _POW_DUP_MAX_NODES
+        )
+
+    @staticmethod
+    def _inexact_reciprocal(node: ast.AST):
+        """``1/c`` for any non-zero finite constant -- accurate to within an
+        ulp rather than exact, hence fastmath only."""
+        value = _as_float_constant(node)
+        if value is None:
+            return None
+        recip = 1.0 / value
+        if not math.isfinite(recip) or abs(recip) < _MIN_NORMAL:
+            return None
+        return recip
+
+    def _fastmath_binop(self, op, left, right):
+        """Float rewrites that are *not* bit-exact (see module docstring)."""
+        # ``F + 0`` / ``0 + F``: only ``-0.0`` observes the difference, and
+        # dropping the operation removes a whole dispatch.
+        if isinstance(op, ast.Add):
+            if _num_const(right, 0) and self._is_float(left):
+                return left
+            if _num_const(left, 0) and self._is_float(right):
+                return right
+        # ``F ** 2 -> F * F``: about 3x faster, but ``1e308 ** 2`` raises
+        # OverflowError where the multiplication yields ``inf``.
+        if (
+            isinstance(op, ast.Pow)
+            and _num_const(right, 2)
+            and self._is_float(left)
+            and sum(1 for _ in ast.walk(left)) <= self._pow_dup_budget
+        ):
+            return ast.BinOp(
+                left=left, op=ast.Mult(), right=copy.deepcopy(left)
+            )
+        return None
+
     def visit_BinOp(self, node: ast.BinOp) -> ast.AST:
         node = self.generic_visit(node)
         proven = self._proven[-1]
@@ -206,6 +294,19 @@ class AlgebraicSimplification(ScopedTransformer):
             elif isinstance(op, ast.Pow) and _num_const(right, 1):
                 if self._is_float(left):
                     replacement = left
+            if replacement is None and isinstance(op, ast.Div):
+                # ``F / 2**k -> F * 2**-k`` is bit-identical (the reciprocal
+                # of a power of two is exact); other divisors only agree to
+                # within an ulp and need the fastmath option.
+                recip = _exact_reciprocal(right)
+                if recip is None and self._fast_math:
+                    recip = self._inexact_reciprocal(right)
+                if recip is not None and self._is_float(left):
+                    replacement = ast.BinOp(
+                        left=left, op=ast.Mult(), right=ast.Constant(recip)
+                    )
+            if replacement is None and self._fast_math:
+                replacement = self._fastmath_binop(op, left, right)
             if replacement is not None:
                 self.changes += 1
                 return ast.copy_location(replacement, node)
@@ -231,7 +332,7 @@ class AlgebraicSimplification(ScopedTransformer):
             elif (
                 _int_const(right, 2)
                 and is_int_expr(left, proven)
-                and sum(1 for _ in ast.walk(left)) <= _POW_DUP_MAX_NODES
+                and sum(1 for _ in ast.walk(left)) <= self._pow_dup_budget
             ):
                 replacement = ast.BinOp(
                     left=left, op=ast.Mult(), right=copy.deepcopy(left)

@@ -61,6 +61,13 @@ _MAX_BITS = 4096
 _MAX_POW_EXP = 64
 _MAX_SHIFT = 256
 
+#: With the aggressive ``budgets`` option the simulator is allowed far more
+#: work: 20M steps costs about a second of optimise time on a modern
+#: machine (measured), which is the trade the option exists to make.
+_GENEROUS_STEPS = 20_000_000
+_GENEROUS_BITS = 1 << 20
+_GENEROUS_POW_EXP = 4096
+
 _BIN_OPS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -151,7 +158,24 @@ def _validate_expr(node: ast.expr) -> bool:
 
 
 class LoopFolding(ScopedTransformer):
+    """The simulator's limits come from :attr:`aggressive` (see module doc)."""
     name = "loop-fold"
+
+    @property
+    def _generous(self) -> bool:
+        return "budgets" in self.aggressive
+
+    @property
+    def _max_steps(self) -> int:
+        return _GENEROUS_STEPS if self._generous else _MAX_STEPS
+
+    @property
+    def _max_bits(self) -> int:
+        return _GENEROUS_BITS if self._generous else _MAX_BITS
+
+    @property
+    def _max_pow_exp(self) -> int:
+        return _GENEROUS_POW_EXP if self._generous else _MAX_POW_EXP
 
     def run(self, tree: ast.Module) -> ast.Module:
         if not builtin_gate(tree, "range"):
@@ -227,7 +251,7 @@ class LoopFolding(ScopedTransformer):
         # Cheap upper bound before simulating: every simulated step consumes
         # at most one body node per iteration.
         weight = sum(1 for _ in ast.walk(loop))
-        if len(rng) * weight > _MAX_STEPS:
+        if len(rng) * weight > self._max_steps:
             return None
 
         # Initial values: the run of plain int/bool constant assignments
@@ -245,7 +269,7 @@ class LoopFolding(ScopedTransformer):
             else:
                 break
 
-        self._budget = _MAX_STEPS
+        self._budget = self._max_steps
         write_order: list[str] = []
         try:
             for value in rng:
@@ -336,9 +360,9 @@ class LoopFolding(ScopedTransformer):
 
     def _binop(self, op: ast.operator, left, right):
         if isinstance(op, ast.Pow):
-            if abs(right) > _MAX_POW_EXP:
+            if abs(right) > self._max_pow_exp:
                 raise _Abort
-            if right > 0 and left.bit_length() * right > _MAX_BITS:
+            if right > 0 and left.bit_length() * right > self._max_bits:
                 raise _Abort
         if isinstance(op, ast.LShift) and right > _MAX_SHIFT:
             raise _Abort
@@ -348,11 +372,10 @@ class LoopFolding(ScopedTransformer):
             raise _Abort from None  # runtime would raise: keep the loop
         return self._check(result)
 
-    @staticmethod
-    def _check(value):
+    def _check(self, value):
         # ``2 ** -1`` is a float; anything non-int leaves our exact world.
         if type(value) not in (int, bool):
             raise _Abort
-        if type(value) is int and value.bit_length() > _MAX_BITS:
+        if type(value) is int and value.bit_length() > self._max_bits:
             raise _Abort
         return value

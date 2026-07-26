@@ -70,8 +70,15 @@ opast --aggressive --disable jit script.py    # all but one
 | Option | What it buys | What it assumes |
 | --- | --- | --- |
 | `annotations` | Parameters and call results annotated `int`/`float` become typed, which unblocks strength reduction, LICM/CSE hoisting and interval narrowing across the function boundary | Annotations reflect runtime types; no `bool` where `int` is annotated (identities only) |
+| `budgets` | Raises every "is this worth it" limit: loop-fold simulates up to 20M steps instead of 200k (about a second of optimization time), constants may fold to far larger literals, statement-body inlining accepts 24 assignments instead of 6 | **Nothing semantic** — only that longer optimization and bigger output are acceptable |
+| `fastmath` | Float rewrites that are not bit-exact: `F + 0` → `F`, `F ** 2` → `F * F` (~3x cheaper per operation), `F / c` → `F * (1/c)` for any constant | `-0.0` may become `0.0`; overflow may yield `inf` where `**` raised `OverflowError`; reciprocal multiplication may differ in the last ulp |
 | `jit` | The numba path described below | numba's int64 arithmetic does not wrap for your values |
 | `opt-imports` | The import hook described above | Optimized imported modules are not monkeypatched |
+
+Note that `F / c` **is** rewritten by default when `c` is a power of two —
+the reciprocal is then exact, so `x / 4.0` → `x * 0.25` is bit-identical
+for every input and needs no assumption. `fastmath` only adds the divisors
+whose reciprocal rounds.
 
 **Why `annotations` matters most**: a parameter is normally *never* provably
 typed — a caller may pass `Decimal`, a numpy array or a subclass — so the

@@ -184,6 +184,9 @@ class ConditionNarrowing:
 
     name = "cond-narrow"
 
+    #: Set by the pipeline (this pass is not a ScopedTransformer).
+    aggressive: frozenset = frozenset()
+
     def __init__(self) -> None:
         self.changes = 0
         self.skipped_scopes = 0
@@ -195,7 +198,7 @@ class ConditionNarrowing:
         self._len_ok = container_gate(tree)
         self._range_ok = builtin_gate(tree, "range")
         self._trust = AnnotationTrust(
-            tree if getattr(self, "trust_annotations", False) else None
+            tree if "annotations" in self.aggressive else None
         )
         self._visit(tree)
         return tree

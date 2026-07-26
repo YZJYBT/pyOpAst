@@ -18,6 +18,10 @@ class ScopedTransformer(ast.NodeTransformer):
 
     name = "pass"
 
+    #: Aggressive options this pass was asked to honour (set by the
+    #: pipeline; see :data:`opast.pipeline.AGGRESSIVE_NAMES`).
+    aggressive: frozenset = frozenset()
+
     def __init__(self) -> None:
         self.changes = 0
         self.skipped_scopes = 0
