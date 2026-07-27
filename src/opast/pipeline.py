@@ -164,12 +164,65 @@ _AGGRESSIVE_REQUIRES = {
 }
 
 
+def rewrite_aggressive_argv(argv: list[str], value_options) -> list[str]:
+    """Pre-parse fix for the bare ``--aggressive`` / ``-O3`` flag.
+
+    argparse's ``nargs='?'`` swallows the next non-dash token as the
+    option's value, so ``opast -O3 script.py`` would eat the script path.
+    The bare flag is therefore rewritten to ``--aggressive=all`` unless the
+    following token is a *valid* option list, which keeps the space-
+    separated value form working.  A script literally named like an option
+    list can always be passed as ``./annotations`` or with ``=all``.
+
+    Rewriting stops at the end of *our own* options: at a literal ``--``
+    and at the first positional (the script path / first workload), since
+    everything beyond belongs to the user's program and must reach its
+    ``sys.argv`` byte-for-byte.  Recognising where a positional starts
+    needs to know which options take a space-separated value, hence
+    *value_options* (e.g. ``-o``/``--disable`` for the main CLI); ``=``
+    forms are self-contained and need no entry.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--":
+            out.extend(argv[i:])
+            break
+        if token in ("--aggressive", "-O3"):
+            nxt = argv[i + 1] if i + 1 < len(argv) else None
+            if nxt is not None and not nxt.startswith("-"):
+                try:
+                    normalize_aggressive(nxt)
+                except ValueError:
+                    pass
+                else:
+                    out.append(f"--aggressive={nxt}")
+                    i += 2
+                    continue
+            out.append("--aggressive=all")
+            i += 1
+            continue
+        if token.startswith("-"):
+            out.append(token)
+            if token in value_options and i + 1 < len(argv):
+                out.append(argv[i + 1])
+                i += 2
+                continue
+            i += 1
+            continue
+        # First positional: the program's own arguments start here.
+        out.extend(argv[i:])
+        break
+    return out
+
+
 def normalize_aggressive(aggressive) -> frozenset[str]:
     """Accept True/None (meaning *all*), an iterable, or a comma-separated
     string; reject unknown names loudly."""
     if aggressive is None or aggressive is False:
         return frozenset()
-    if aggressive is True:
+    if aggressive is True or aggressive == "all":
         return frozenset(AGGRESSIVE_NAMES)
     if isinstance(aggressive, str):
         names = [part.strip() for part in aggressive.split(",") if part.strip()]

@@ -15,8 +15,17 @@ from .pipeline import (
     normalize_aggressive,
     optimize_file,
     optimize_source,
+    rewrite_aggressive_argv,
 )
 from .runner import execute
+
+
+#: Our options that take a space-separated value -- rewrite_aggressive_argv
+#: needs these to locate the first positional (see its docstring).
+_VALUE_OPTIONS = frozenset(
+    {"-o", "--output", "--max-iterations", "--disable",
+     "--opt-imports-under", "-c", "--code"}
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,7 +85,8 @@ def main(argv: list[str] | None = None) -> int:
                              "first script argument)")
     parser.add_argument("args", nargs=argparse.REMAINDER,
                         help="arguments passed to the script")
-    ns = parser.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    ns = parser.parse_args(rewrite_aggressive_argv(argv, _VALUE_OPTIONS))
 
     if ns.code is None and ns.script is None:
         parser.error("a script path is required (or use -c CODE)")

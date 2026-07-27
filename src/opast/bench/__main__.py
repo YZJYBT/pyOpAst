@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-from ..pipeline import optimize_source
+from ..pipeline import optimize_source, rewrite_aggressive_argv
 from ..runner import _materialize_source
 
 WORKLOAD_DIR = Path(__file__).resolve().parent / "workloads"
@@ -117,7 +117,10 @@ def main(argv: list[str] | None = None) -> int:
                              "flag = all; see the main CLI)")
     parser.add_argument("--list", action="store_true",
                         help="list built-in workloads and exit")
-    ns = parser.parse_args(argv)
+    argv = sys.argv[1:] if argv is None else list(argv)
+    ns = parser.parse_args(
+        rewrite_aggressive_argv(argv, frozenset({"-r", "--repeat"}))
+    )
 
     if ns.list:
         for path in discover([]):
