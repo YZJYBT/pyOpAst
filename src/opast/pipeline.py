@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .passes import (
     AlgebraicSimplification,
+    AttributeHoisting,
     CommonSubexpressionElimination,
     ComprehensionToMap,
     ConditionNarrowing,
@@ -55,6 +56,7 @@ PASS_CLASSES = (
     # stays earlier so index loops get their strength rewrites first).
     RangeToIteration,
     LoopInvariantMotion,
+    AttributeHoisting,  # aggressive "attrs": after LICM, same block walk
     CommonSubexpressionElimination,
     UnusedElimination,
     FunctionInlining,
@@ -78,6 +80,7 @@ DEFAULT_MAX_ITERATIONS = 8
 #: accepts by enabling it (reported by ``--report``).
 AGGRESSIVE_NAMES = (
     "annotations",
+    "attrs",
     "budgets",
     "fastmath",
     "jit",
@@ -94,6 +97,11 @@ AGGRESSIVE_ASSUMPTIONS = {
     "annotations": (
         "parameter/return annotations reflect runtime types "
         "(and no bool is passed where int is annotated)"
+    ),
+    "attrs": (
+        "attributes read inside loops are stable: no property/__getattr__ "
+        "side effects, nothing rebinds them mid-loop, and a zero-iteration "
+        "loop may now perform the lookup once"
     ),
     # Not a semantic bet -- a resource one, kept here so one flag covers
     # every "you asked for it" knob.
@@ -132,6 +140,7 @@ AGGRESSIVE_ASSUMPTIONS = {
 #: option down and to decide whether it is worth reporting (an option whose
 #: every consumer was ``--disable``d is not in play).
 _AGGRESSIVE_CONSUMERS = {
+    "attrs": (AttributeHoisting,),
     "annotations": (
         AlgebraicSimplification,
         ConditionNarrowing,

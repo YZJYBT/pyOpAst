@@ -71,6 +71,7 @@ opast --aggressive --disable jit script.py    # 全开但排除某项
 | 选项 | 换来什么 | 赌的假设 |
 | --- | --- | --- |
 | `annotations` | 注解为 `int`/`float` 的参数与调用结果获得类型,强度削减、LICM/CSE 外提、区间收窄由此**跨过函数边界** | 注解与运行期类型一致;不把 `bool` 传给标注 `int` 的参数(仅影响恒等式) |
+| `attrs` | **属性外提**:循环不变的属性链提到循环前的局部变量——点分模块调用(`math.floor(i)`)实测 **1.77 倍**,属性值读取 1.24 倍。**实例方法调用刻意不碰**:绑定方法缓存在 3.14 上实测 0.90 倍,比解释器的方法调用特化路径更慢(这条民间经验已过时)。循环内对链的任何前缀赋值即取消该链的外提 | 循环内读取的属性是稳定的:无 property/`__getattr__` 副作用、循环期间无人重绑;零迭代循环会多做一次查找 |
 | `budgets` | 把所有"值不值得"的上限调高:loop-fold 的模拟步数 20 万 → **2000 万**(实测约 1 秒优化耗时)、常量折叠允许产出大得多的字面量、语句体内联预算 6 条 → 24 条 | **不赌任何语义**——只是接受更长的优化时间与更大的产物 |
 | `fastmath` | 非逐位精确的浮点改写:`F + 0` → `F`、`F ** 2` → `F * F`(该运算实测快 ~3 倍)、`F / c` → `F * (1/c)`(任意常量除数) | `-0.0` 可能变成 `0.0`;溢出时 `**` 原本抛 `OverflowError`,改写后得到 `inf`;倒数乘法可能差最后 1 ulp |
 | `jit` | 下文的 numba 路径 | numba 的 int64 运算对你的数值不回绕 |
@@ -147,7 +148,7 @@ python -m opast.bench --jit daily      # 连同 jit pass 一起测(需 numba;预
 python -m opast.bench my_hot_script.py         # 也可测任意脚本(可选定义 RESULT 供校验)
 ```
 
-内置负载:`inline`(小函数热循环)、`inlinestmt`(多语句函数体的语句级内联)、`algebra`(可证明 int 的恒等式噪声)、`strength`(for-range 计数器上的强度削减与 `abs` 消除)、`dedynamize`(热循环里的常量 `eval`/`getattr`)、`licm`(热循环里的不变量表达式)、`lencache`(热循环里新鲜列表的 `len()`)、`rangeiter`(新鲜列表上的下标循环转直接迭代/enumerate)、`condnarrow`(热循环里可证死亡的守卫)、`looptocomp`(append 累加循环转推导式)、`loopfold`(常量边界纯 int 热核的优化期折叠与向外坍缩)、`comptomap`(内置函数上的推导式转 map/filter)、`localize`(热循环里的内置名/模块全局名局部化)、`mixed`(内联→折叠级联+死代码)、`daily`(日常风格的订单结算日报,单个脚本同时覆盖全部 pass 的实用测试点)、`jitlazy`(变量边界数值核,`--jit` 下验证运行期 lazy 触发,普通模式预期 ~1x)、`annotated`(带类型注解的数值核,`--aggressive=annotations` 下生效,默认 ~1x)、`fastmath`(浮点核,`--aggressive=fastmath` 下生效,默认 ~1x)、`tailrec`(累加器尾递归,`--aggressive=tail-calls` 下生效)、`control`(无可优化项,预期 ~1.00x,验证零回归)。注意:纯常量折叠类优化(`1+2`、`"a"*3`)CPython 编译器自己也会做,opast 的运行时收益主要来自 CPython 不做的部分——内联、需类型证明的代数化简、去动态化。
+内置负载:`inline`(小函数热循环)、`inlinestmt`(多语句函数体的语句级内联)、`algebra`(可证明 int 的恒等式噪声)、`strength`(for-range 计数器上的强度削减与 `abs` 消除)、`dedynamize`(热循环里的常量 `eval`/`getattr`)、`licm`(热循环里的不变量表达式)、`lencache`(热循环里新鲜列表的 `len()`)、`rangeiter`(新鲜列表上的下标循环转直接迭代/enumerate)、`condnarrow`(热循环里可证死亡的守卫)、`looptocomp`(append 累加循环转推导式)、`loopfold`(常量边界纯 int 热核的优化期折叠与向外坍缩)、`comptomap`(内置函数上的推导式转 map/filter)、`localize`(热循环里的内置名/模块全局名局部化)、`mixed`(内联→折叠级联+死代码)、`daily`(日常风格的订单结算日报,单个脚本同时覆盖全部 pass 的实用测试点)、`jitlazy`(变量边界数值核,`--jit` 下验证运行期 lazy 触发,普通模式预期 ~1x)、`annotated`(带类型注解的数值核,`--aggressive=annotations` 下生效,默认 ~1x)、`fastmath`(浮点核,`--aggressive=fastmath` 下生效,默认 ~1x)、`tailrec`(累加器尾递归,`--aggressive=tail-calls` 下生效)、`attrhoist`(循环不变属性链,`--aggressive=attrs` 下生效)、`control`(无可优化项,预期 ~1.00x,验证零回归)。注意:纯常量折叠类优化(`1+2`、`"a"*3`)CPython 编译器自己也会做,opast 的运行时收益主要来自 CPython 不做的部分——内联、需类型证明的代数化简、去动态化。
 
 Python API:
 

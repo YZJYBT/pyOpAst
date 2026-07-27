@@ -72,6 +72,7 @@ opast --aggressive --disable jit script.py    # all but one
 | Option | What it buys | What it assumes |
 | --- | --- | --- |
 | `annotations` | Parameters and call results annotated `int`/`float` become typed, which unblocks strength reduction, LICM/CSE hoisting and interval narrowing across the function boundary | Annotations reflect runtime types; no `bool` where `int` is annotated (identities only) |
+| `attrs` | **Attribute hoisting**: loop-invariant attribute chains move to pre-loop locals — dotted module calls (`math.floor(i)`) measured **1.77x**, attribute value reads 1.24x. Instance *method calls* are deliberately not touched: bound-method caching measured 0.90x on 3.14, slower than the interpreter's specialized call path. Writes to any prefix of a chain inside the loop cancel its hoists | Attributes read inside loops are stable: no property/`__getattr__` side effects, nothing rebinds them mid-loop; a zero-iteration loop may now perform the lookup once |
 | `budgets` | Raises every "is this worth it" limit: loop-fold simulates up to 20M steps instead of 200k (about a second of optimization time), constants may fold to far larger literals, statement-body inlining accepts 24 assignments instead of 6 | **Nothing semantic** — only that longer optimization and bigger output are acceptable |
 | `fastmath` | Float rewrites that are not bit-exact: `F + 0` → `F`, `F ** 2` → `F * F` (~3x cheaper per operation), `F / c` → `F * (1/c)` for any constant | `-0.0` may become `0.0`; overflow may yield `inf` where `**` raised `OverflowError`; reciprocal multiplication may differ in the last ulp |
 | `jit` | The numba path described below | numba's int64 arithmetic does not wrap for your values |
@@ -170,7 +171,7 @@ python -m opast.bench --jit daily
 python -m opast.bench --list
 ```
 
-20 built-in workloads, each executed twice per measurement (original vs optimized) in the same interpreter with GC disabled and a `RESULT` equality check. Several (`annotated`, `fastmath`, `tailrec`, `jitlazy`) are ~1.0x by default and only meaningful with the matching `--aggressive` option or `--jit`; `python -m opast.bench --aggressive ...` passes the options through. Note that CPython's own compiler already does trivial constant folding — opast's wins come from what CPython does *not* do: inlining, type-proven algebraic rewrites, loop rewrites, de-dynamization.
+21 built-in workloads, each executed twice per measurement (original vs optimized) in the same interpreter with GC disabled and a `RESULT` equality check. Several (`annotated`, `fastmath`, `tailrec`, `attrhoist`, `jitlazy`) are ~1.0x by default and only meaningful with the matching `--aggressive` option or `--jit`; `python -m opast.bench --aggressive ...` passes the options through. Note that CPython's own compiler already does trivial constant folding — opast's wins come from what CPython does *not* do: inlining, type-proven algebraic rewrites, loop rewrites, de-dynamization.
 
 ## IPython / Jupyter
 

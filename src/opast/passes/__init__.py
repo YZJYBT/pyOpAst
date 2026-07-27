@@ -1,6 +1,7 @@
 """Optimisation passes."""
 
 from .algebra import AlgebraicSimplification
+from .attrhoist import AttributeHoisting
 from .base import ScopedTransformer
 from .comprehension import ComprehensionToMap
 from .condnarrow import ConditionNarrowing
@@ -29,6 +30,7 @@ __all__ = [
     "ConditionNarrowing",
     "DeadCodeElimination",
     "LoopInvariantMotion",
+    "AttributeHoisting",
     "CommonSubexpressionElimination",
     "UnusedElimination",
     "FunctionInlining",
