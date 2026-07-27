@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0 (2026-07-27)
+
+**新增:两层契约与 `--aggressive` / `-O3`。** 默认层保持"每条改写皆有静态证明";激进层每个选项以一条明确写出的假设换取更多优化,`--report` 逐条列出**实际生效**的假设(被 `--disable` 掉全部消费者的选项不虚报)。八个选项:
+
+- `annotations` — 信任裸 `int`/`float` 参数与返回注解,强度削减 / LICM / CSE / 区间收窄跨过函数边界(`bool` 子类与 PEP 484 数值塔已各自处理);
+- `budgets` — 纯资源交换:loop-fold 模拟步数 20 万 → 2000 万、折叠字面量与内联预算放大;
+- `fastmath` — 非逐位精确的浮点改写:`F + 0`、`F ** 2 → F * F`(该运算约 3 倍)、任意常量除数转倒数乘;
+- `loop-state` — 模块层热循环外提(`LOAD_NAME` → `LOAD_FAST`,实测 ~2 倍)及模块层 loop-to-comp;假设:循环中途异常时模块全局可能保持循环前值;
+- `module-locals` — 修饰 `loop-state`:无人读取的模块级名字视为私有临时量;
+- `tail-calls` — 尾递归消除(带深度计数器复现 `RecursionError`,2.6 倍;支持分治代码的部分消除);
+- `unbounded-recursion` — 修饰 `tail-calls`:去掉计数器(4.6 倍,深层尾递归直接跑通);
+- `jit` / `opt-imports` — 既有选择加入项纳入同一伞下,独立开关保留。
+
+**新增默认层 pass:** `cond-narrow`(区间可判定的条件折叠:路径敏感收窄、赋值传递、守卫子句)。proven-float 分析接入 algebra/LICM/CSE;`F / 2^k → F * 2^-k`(逐位精确)进入默认层。
+
+**修复:** LICM/CSE 的支配扫描此前从不把参数视为已绑定,涉及参数的表达式从未被外提过;dead-code 现在清理复制传播遗留的无用裸名字语句;超大整数除数(`10**400`)曾使代数化简崩溃。
+
+**⚠️ 行为变更:** 模块层的 loop-to-comp 改写从默认层收紧至 `--aggressive=loop-state`——循环中途异常时"半满列表"与"从未赋值"的差异在模块层可被外部 `try` 观察,不再符合默认层的证明标准。函数内不受影响。
+
 ## 0.1.0 (2026-07-24)
 
 首个公开版本。包名 `opast`("OPtimizing AST",PyPI/import/CLI 三者一致);GitHub 仓库 pyOpAst。
