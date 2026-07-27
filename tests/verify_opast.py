@@ -1866,14 +1866,6 @@ def verify_inline_statement_regressions() -> Area:
         area.fail("statement-body inlining did not preserve one left-to-right evaluation of side-effecting args", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(side_effects)]))
 
     blocked_cases = {
-        "inlinestmt_keyword_blocked": """
-            def helper(a):
-                x = a + 1
-                return x
-            def f():
-                return helper(a=2)
-            print(f())
-        """,
         "inlinestmt_unboundlocal_preserved": """
             def helper():
                 x = x + 1
@@ -1883,18 +1875,6 @@ def verify_inline_statement_regressions() -> Area:
                     return helper()
                 except Exception as e:
                     return type(e).__name__
-            print(f())
-        """,
-        "inlinestmt_expression_positions_blocked": """
-            def helper(a):
-                x = a + 1
-                return x
-            def wrap(v):
-                return v * 2
-            def f():
-                total = 1
-                total += helper(2)
-                return wrap(helper(total))
             print(f())
         """,
         "inlinestmt_shadowed_free_name": """
@@ -1932,16 +1912,102 @@ def verify_inline_statement_regressions() -> Area:
         s = show(p)
         if s.returncode != 0:
             area.fail(f"{name}: --show failed", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(p)]))
-        elif name == "inlinestmt_keyword_blocked" and "helper(a=2)" not in s.stdout:
-            area.fail("keyword call was statement-inlined", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(p)]))
         elif name == "inlinestmt_unboundlocal_preserved" and "helper()" not in s.stdout:
             area.fail("read-local-before-assign helper was statement-inlined", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(p)]))
-        elif name == "inlinestmt_expression_positions_blocked" and ("helper(2)" not in s.stdout or "helper(total)" not in s.stdout):
-            area.fail("expression-position statement-body call was rewritten", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(p)]))
         elif name == "inlinestmt_shadowed_free_name" and "helper(v)" not in s.stdout:
             area.fail("helper with shadowed free name was statement-inlined", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(p)]))
         elif name == "inlinestmt_oversized_body" and "helper(1)" not in s.stdout:
             area.fail("helper with 7 assigns was statement-inlined", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(p)]))
+
+    expression_positions = write_case(
+        "inlinestmt_expression_positions_blocked",
+        """
+        def allow(a):
+            x = a + 1
+            return x
+        def block(a):
+            x = a + 1
+            return x
+        def block_iter(a):
+            x = a[:]
+            return x
+        def sink(value):
+            return value
+        def deco(value):
+            def apply(fn):
+                return fn
+            return apply
+
+        @deco(block(22))
+        def decorated():
+            return 0
+        def with_default(value=block(23)):
+            return value
+        class AtClass:
+            value = block(24)
+
+        def f(flag):
+            total = 10 + allow(a=1)
+            sink(allow(a=2))
+            if allow(a=3):
+                total += 1
+            total += block(4)
+            left_and = flag and block(5)
+            left_or = flag or block(6)
+            choice = block(7) if flag else block(8)
+            chain = 0 < flag < block(9)
+            delayed = lambda: block(10)
+            total += delayed()
+            comp = [block(x) for x in (11,)]
+            text = f"{block(12)}"
+            while block(-1):
+                total += 100
+            for value in block_iter((13,)):
+                total += value
+            return total + allow(a=4)
+
+        print(f(False), decorated(), with_default(), AtClass.value)
+        """,
+    )
+    assert_same_output(area, expression_positions)
+    s = show(expression_positions)
+    command = command_text(
+        [PYTHON, "-m", "opast", "--show", "--no-run", str(expression_positions)]
+    )
+    if s.returncode != 0:
+        area.fail("expression-position case: --show failed", command)
+    else:
+        # Calls in Assign/Return/Expr values and If tests, including
+        # keywords, inline (the now-unused definition may also be removed).
+        if "allow(a=" in s.stdout:
+            area.fail(
+                "eligible expression-position or keyword call was not inlined",
+                command,
+            )
+        blocked_calls = (
+            "block(4)",
+            "block(5)",
+            "block(6)",
+            "block(7)",
+            "block(8)",
+            "block(9)",
+            "block(10)",
+            "block(x)",
+            "block(12)",
+            "block_iter((13,))",
+            "block(22)",
+            "block(23)",
+            "block(24)",
+        )
+        missing = [call for call in blocked_calls if call not in s.stdout]
+        if missing:
+            area.fail(
+                "blocked expression-position call was inlined: "
+                + ", ".join(missing),
+                command,
+            )
+        if "while " not in s.stdout or "(-1)" not in s.stdout:
+            area.fail("While-test statement-body call was inlined", command)
 
     constant_shadow_cascade = write_case(
         "inlinestmt_constant_shadow_cascade",

@@ -54,6 +54,7 @@ import math
 from ..analysis import (
     AnnotationTrust,
     builtin_gate,
+    hoistable_int_expr,
     infer_float_names,
     infer_int_names,
     infer_int_ranges,
@@ -158,6 +159,8 @@ class AlgebraicSimplification(ScopedTransformer):
             return tree
         self._range_ok = builtin_gate(tree, "range")
         self._abs_ok = builtin_gate(tree, "abs")
+        self._min_ok = builtin_gate(tree, "min")
+        self._max_ok = builtin_gate(tree, "max")
         self._trust = AnnotationTrust(
             tree if "annotations" in self.aggressive else None
         )
@@ -397,17 +400,53 @@ class AlgebraicSimplification(ScopedTransformer):
 
     def visit_Call(self, node: ast.Call) -> ast.AST:
         node = self.generic_visit(node)
-        if (
-            self._abs_ok
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "abs"
-            and len(node.args) == 1
-            and not node.keywords
-        ):
+        if not (isinstance(node.func, ast.Name) and not node.keywords):
+            return node
+        name = node.func.id
+        if self._abs_ok and name == "abs" and len(node.args) == 1:
             arg = node.args[0]
             if is_int_expr(arg, self._proven[-1]):
                 interval = int_expr_range(arg, self._ranges[-1])
                 if interval is not None and interval[0] >= 0:
                     self.changes += 1
                     return ast.copy_location(arg, node)
+        if (
+            name in ("min", "max")
+            and len(node.args) == 2
+            and (self._min_ok if name == "min" else self._max_ok)
+        ):
+            replacement = self._fold_clamp(name, node.args[0], node.args[1])
+            if replacement is not None:
+                self.changes += 1
+                return ast.copy_location(replacement, node)
         return node
+
+    def _fold_clamp(self, name: str, a: ast.expr, b: ast.expr):
+        """Interval-decided two-argument ``min``/``max``.
+
+        The kept operand only needs to be proven int (its evaluation
+        stays); the *dropped* one must be pure AND total
+        (:func:`hoistable_int_expr`), since it will no longer run.  Ties:
+        both builtins return the **first** argument, so keeping ``a``
+        tolerates equality while keeping ``b`` needs strict dominance --
+        which object of two equal ints comes back is observable through
+        ``is``, however unspecified that is for user code.
+        """
+        proven = self._proven[-1]
+        if not (is_int_expr(a, proven) and is_int_expr(b, proven)):
+            return None
+        ra = int_expr_range(a, self._ranges[-1])
+        rb = int_expr_range(b, self._ranges[-1])
+        if ra is None or rb is None:
+            return None
+        if name == "min":
+            keep_a = ra[1] <= rb[0]   # a <= b always; ties return a anyway
+            keep_b = rb[1] < ra[0]    # b < a strictly
+        else:
+            keep_a = ra[0] >= rb[1]   # a >= b always; ties return a anyway
+            keep_b = rb[0] > ra[1]    # b > a strictly
+        if keep_a and hoistable_int_expr(b, proven, frozenset()):
+            return a
+        if keep_b and hoistable_int_expr(a, proven, frozenset()):
+            return b
+        return None

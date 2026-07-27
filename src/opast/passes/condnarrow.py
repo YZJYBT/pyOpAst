@@ -31,7 +31,11 @@ Soundness rules for the narrowed environment:
   the false branch (all operands fail), ``not`` swaps the two;
 * only *pure* int expressions are ever folded (names, int constants,
   arithmetic and ``len()`` of a fresh container -- :func:`is_int_expr`), so
-  removing an evaluation can never remove a side effect.
+  removing an evaluation can never remove a side effect;
+* pure is not *total*: ``10 // x`` raises when ``x`` can be 0.  Any operand
+  a rewrite would stop evaluating must additionally be
+  :func:`hoistable_int_expr` (provably never raises); operands the original
+  short-circuit already skipped are exempt.
 
 Function scopes only, like the other interval consumers: module globals may
 be rebound by any called function, so nothing is provably ranged there.
@@ -51,6 +55,7 @@ from ..analysis import (
     _binop_range,
     builtin_gate,
     fresh_container_names,
+    hoistable_int_expr,
     infer_int_names,
     infer_int_ranges,
     int_expr_range,
@@ -160,23 +165,66 @@ class _Folder(ast.NodeTransformer):
 
     def visit_Compare(self, node: ast.Compare) -> ast.AST:
         node = self.generic_visit(node)
-        if len(node.ops) != 1:
-            return node  # chained comparisons: left alone
-        left, right = node.left, node.comparators[0]
-        if not (
-            is_int_expr(left, self.ints, self.containers)
-            and is_int_expr(right, self.ints, self.containers)
+        operands = [node.left, *node.comparators]
+        if not all(
+            is_int_expr(o, self.ints, self.containers) for o in operands
         ):
             return node
-        verdict = _decide(
-            node.ops[0],
-            int_expr_range(left, self.env, self.containers),
-            int_expr_range(right, self.env, self.containers),
-        )
-        if verdict is None:
+        # A chain is the conjunction of its legs, with each middle operand
+        # evaluated once.  Operands are pure (``is_int_expr``) but not
+        # necessarily *total* -- ``10 // x`` raises when ``x`` can be 0 --
+        # so an operand may only be DROPPED when it is also hoistable
+        # (provably never raises).  Within that limit the short-circuit is
+        # unobservable: one provably-false leg makes the whole chain False
+        # (operands past that leg never ran in the original either), all
+        # legs True makes it True.  Otherwise provably-true legs are peeled
+        # from the FRONT and BACK only, so the remainder stays one
+        # contiguous chain (``0 <= i < n`` becomes ``i < n``); an undecided
+        # leg surrounded by decided ones keeps the original chain rather
+        # than duplicating shared operands.
+        ranges = [
+            int_expr_range(o, self.env, self.containers) for o in operands
+        ]
+        verdicts = [
+            _decide(op, ranges[k], ranges[k + 1])
+            for k, op in enumerate(node.ops)
+        ]
+        droppable = [
+            hoistable_int_expr(o, self.ints, self.containers)
+            for o in operands
+        ]
+        for k, v in enumerate(verdicts):
+            if v is False:
+                # The original evaluates operands 0..k+1 at most (the chain
+                # stops at leg *k*); replacing with False deletes those
+                # evaluations, so every one of them must be total.
+                if all(droppable[: k + 2]):
+                    self.owner.changes += 1
+                    return ast.copy_location(ast.Constant(False), node)
+                return node
+        if all(v is True for v in verdicts) and all(droppable):
+            self.owner.changes += 1
+            return ast.copy_location(ast.Constant(True), node)
+        # Peeling a front leg drops its left operand; peeling a back leg
+        # drops its right operand.  Either drop needs totality.  At least
+        # one leg always remains: reaching here means some operand is not
+        # droppable (the all-True/all-droppable fold did not fire), and a
+        # fully peeled chain would delete that operand's evaluation.
+        lo = 0
+        hi = len(verdicts)
+        while lo < hi - 1 and verdicts[lo] is True and droppable[lo]:
+            lo += 1
+        while hi - lo > 1 and verdicts[hi - 1] is True and droppable[hi]:
+            hi -= 1
+        if lo == 0 and hi == len(verdicts):
             return node
         self.owner.changes += 1
-        return ast.copy_location(ast.Constant(verdict), node)
+        trimmed = ast.Compare(
+            left=operands[lo],
+            ops=node.ops[lo:hi],
+            comparators=operands[lo + 1 : hi + 1],
+        )
+        return ast.copy_location(trimmed, node)
 
 
 class ConditionNarrowing:
@@ -277,7 +325,15 @@ class ConditionNarrowing:
             elif hi == 0:
                 env[test.id] = (lo, -1) if lo <= -1 else current
             return
-        if not (isinstance(test, ast.Compare) and len(test.ops) == 1):
+        if not isinstance(test, ast.Compare):
+            return
+        if len(test.ops) > 1:
+            # A true chain means every leg holds; a false chain only means
+            # *some* leg failed, which narrows nothing.
+            if truth:
+                operands = [test.left, *test.comparators]
+                for k, op in enumerate(test.ops):
+                    self._apply_leg(env, operands[k], op, operands[k + 1])
             return
         op = test.ops[0]
         if not truth:
@@ -285,7 +341,9 @@ class ConditionNarrowing:
             if negated is None:
                 return
             op = negated()
-        left, right = test.left, test.comparators[0]
+        self._apply_leg(env, test.left, op, test.comparators[0])
+
+    def _apply_leg(self, env: dict, left, op, right) -> None:
         # ``name <op> expr`` and the mirrored ``expr <op> name``.
         for target, other, effective in (
             (left, right, op),

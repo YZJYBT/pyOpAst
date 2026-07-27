@@ -9,14 +9,28 @@ Two candidate shapes, both module-level plain ``def``s:
   count and order are preserved.
 * **straight-line statement body** -- a docstring plus up to
   ``_STMT_BODY_MAX`` single-target name assignments ending in ``return
-  <expression>`` (no branches, loops, or any other statement kind).  Only
-  call sites where the call *is* the whole value of an ``x = f(...)``,
-  ``return f(...)`` or bare ``f(...)`` statement inside a function are
-  rewritten: the arguments are evaluated left-to-right into fresh
-  ``_opast_in_<site>_<param>`` locals (any argument expression is fine --
-  each is evaluated exactly once, in call order; positional only), the body
-  assignments follow with all locals renamed, and the original statement
-  keeps the renamed return expression.  Function locals are invisible to the
+  <expression>`` (no branches, loops, or any other statement kind).
+  Rewritten call sites, always inside a function:
+
+  - the call as the whole value of an ``x = f(...)``, ``return f(...)`` or
+    bare ``f(...)`` statement;
+  - the call **buried in an expression** of such a statement, or of an
+    ``if`` test -- provided it sits in an *unconditionally evaluated*
+    position (never behind ``and``/``or`` short-circuits, ``if/else``
+    expression arms, chained-comparison tails, lambdas or comprehensions).
+    Every subtree the statement evaluates before the call is bound to its
+    own ``_opast_in_<site>_pfx<k>`` temp first, in evaluation order, so
+    side effects and exceptions keep their exact original positions --
+    single evaluation, not purity, is what a temp preserves.  Constants
+    and provably-bound candidate names in call-func position skip the
+    temp (the latter so the next fixpoint iteration can inline them too).
+
+  Arguments -- positional and **keyword** -- are evaluated in call-site
+  written order into fresh ``_opast_in_<site>_<param>`` locals (missing
+  parameters take their constant defaults; unexpected or duplicate
+  keywords keep the runtime ``TypeError`` by not rewriting), the body
+  assignments follow with all locals renamed, and the call's position gets
+  the renamed return expression.  Function locals are invisible to the
   caller by construction, so the renamed temps are the only observable
   difference (tracebacks lose one frame -- a documented opast limitation).
 
@@ -242,6 +256,70 @@ def _collect_candidates(module: ast.Module, stmt_budget: int = _STMT_BODY_MAX):
     return expr_candidates, stmt_candidates
 
 
+def _eval_children(node: ast.AST):
+    """Children of *node* in **evaluation order**, each tagged with whether
+    it is evaluated unconditionally once *node*'s evaluation starts.  Nodes
+    that defer or repeat evaluation (lambdas, comprehensions, f-strings,
+    walrus, yield/await) yield nothing, so the call finder never enters
+    them; unknown node kinds likewise stay opaque."""
+    if isinstance(node, ast.BinOp):
+        return [(node.left, True), (node.right, True)]
+    if isinstance(node, ast.UnaryOp):
+        return [(node.operand, True)]
+    if isinstance(node, ast.BoolOp):
+        return [(node.values[0], True)] + [(v, False) for v in node.values[1:]]
+    if isinstance(node, ast.Compare):
+        out = [(node.left, True), (node.comparators[0], True)]
+        out += [(c, False) for c in node.comparators[1:]]
+        return out
+    if isinstance(node, ast.Call):
+        out = [(node.func, True)]
+        out += [(a, True) for a in node.args]
+        out += [(kw.value, True) for kw in node.keywords]
+        return out
+    if isinstance(node, ast.IfExp):
+        return [(node.test, True), (node.body, False), (node.orelse, False)]
+    if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        return [(e, True) for e in node.elts]
+    if isinstance(node, ast.Dict):
+        out = []
+        for key, value in zip(node.keys, node.values):
+            if key is not None:
+                out.append((key, True))
+            out.append((value, True))
+        return out
+    if isinstance(node, ast.Subscript):
+        return [(node.value, True), (node.slice, True)]
+    if isinstance(node, ast.Attribute):
+        return [(node.value, True)]
+    if isinstance(node, ast.Starred):
+        return [(node.value, True)]
+    if isinstance(node, ast.Slice):
+        return [
+            (part, True)
+            for part in (node.lower, node.upper, node.step)
+            if part is not None
+        ]
+    return []
+
+
+def _replace_child(parent: ast.AST, old: ast.AST, new: ast.AST) -> None:
+    for name, value in ast.iter_fields(parent):
+        if value is old:
+            setattr(parent, name, new)
+            return
+        if isinstance(value, list):
+            for k, item in enumerate(value):
+                if item is old:
+                    value[k] = new
+                    return
+                # keyword nodes wrap their value one level down
+                if isinstance(item, ast.keyword) and item.value is old:
+                    item.value = new
+                    return
+    raise AssertionError("child not found during inline replacement")
+
+
 class _Substituter(ast.NodeTransformer):
     def __init__(self, mapping: dict[str, ast.expr]) -> None:
         self.mapping = mapping
@@ -381,10 +459,12 @@ class FunctionInlining(ScopedTransformer):
         return ast.copy_location(new_expr, node)
 
     # -- statement-body inlining -------------------------------------------
-    def _stmt_inline(self, stmt: ast.stmt, call: ast.expr):
-        """Inline a statement-body candidate when *call* (the whole value of
-        *stmt*) is an eligible call.  Returns the replacement statement list
-        or None."""
+    def _match_stmt_call(self, call: ast.expr):
+        """``(candidate, ordered)`` for an eligible statement-body call,
+        where *ordered* is the ``(param, value)`` list in **call-site
+        written order** -- positionals, then keywords as written, then
+        constant defaults -- so the argument temps evaluate exactly when
+        the call would have evaluated them.  None when ineligible."""
         if not (self._scope_kinds and self._scope_kinds[-1]):
             return None  # only directly inside a function body
         if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
@@ -398,19 +478,32 @@ class FunctionInlining(ScopedTransformer):
             return None
         if any(self._shadowed(name) for name in cand.free_names):
             return None
-        # Positional arguments only: temps are bound in parameter order, so
-        # keyword arguments could reorder call-site evaluation.
-        if call.keywords or any(isinstance(a, ast.Starred) for a in call.args):
+        if any(isinstance(a, ast.Starred) for a in call.args):
+            return None
+        if any(kw.arg is None for kw in call.keywords):  # **kwargs
             return None
         if len(call.args) > len(cand.params):
             return None
-        values: list[ast.expr] = list(call.args)
-        for param in cand.params[len(call.args):]:
-            default = cand.defaults.get(param)
-            if default is None:
-                return None
-            values.append(copy.deepcopy(default))
+        ordered: list[tuple[str, ast.expr]] = list(
+            zip(cand.params, call.args)
+        )
+        seen = {param for param, _ in ordered}
+        for kw in call.keywords:
+            if kw.arg not in cand.params or kw.arg in seen:
+                return None  # unexpected/duplicate: keep the TypeError
+            ordered.append((kw.arg, kw.value))
+            seen.add(kw.arg)
+        for param in cand.params:
+            if param not in seen:
+                default = cand.defaults.get(param)
+                if default is None:
+                    return None
+                ordered.append((param, copy.deepcopy(default)))
+        return cand, ordered
 
+    def _expand(self, cand: _Candidate, ordered, loc: ast.stmt):
+        """Argument temps (in call order) plus renamed body assignments;
+        returns ``(prelude_statements, renamed_return_expr)``."""
         site = self._site_counter
         self._site_counter += 1
         rename = {
@@ -420,25 +513,133 @@ class FunctionInlining(ScopedTransformer):
         sub = _Substituter(
             {old: ast.Name(id=new, ctx=ast.Load()) for old, new in rename.items()}
         )
-        out: list[ast.stmt] = []
-        for param, value in zip(cand.params, values):
+        prelude: list[ast.stmt] = []
+        for param, value in ordered:
             target = ast.Name(id=rename[param], ctx=ast.Store())
-            out.append(
-                ast.copy_location(ast.Assign(targets=[target], value=value), stmt)
+            prelude.append(
+                ast.copy_location(ast.Assign(targets=[target], value=value), loc)
             )
         for tname, texpr in cand.assigns:
             target = ast.Name(id=rename[tname], ctx=ast.Store())
             value = sub.visit(copy.deepcopy(texpr))
-            out.append(
-                ast.copy_location(ast.Assign(targets=[target], value=value), stmt)
+            prelude.append(
+                ast.copy_location(ast.Assign(targets=[target], value=value), loc)
             )
-        ret = sub.visit(copy.deepcopy(cand.expr))
-        if isinstance(stmt, (ast.Assign, ast.Return, ast.Expr)):
-            stmt.value = ast.copy_location(ret, call)
-        out.append(stmt)
-        ast.fix_missing_locations(
-            ast.Module(body=out, type_ignores=[])
+        return prelude, sub.visit(copy.deepcopy(cand.expr))
+
+    def _stmt_inline(self, stmt: ast.stmt, call: ast.expr):
+        """Inline a statement-body candidate when *call* (the whole value of
+        *stmt*) is an eligible call.  Returns the replacement statement list
+        or None."""
+        matched = self._match_stmt_call(call)
+        if matched is None:
+            return None
+        cand, ordered = matched
+        prelude, ret = self._expand(cand, ordered, stmt)
+        stmt.value = ast.copy_location(ret, call)
+        out = [*prelude, stmt]
+        ast.fix_missing_locations(ast.Module(body=out, type_ignores=[]))
+        self.changes += 1
+        return out
+
+    # -- expression-position statement-body inlining ------------------------
+    def _find_expr_call(self, expr: ast.expr):
+        """First eligible statement-candidate call in *expr*'s evaluation
+        order, restricted to unconditionally-evaluated positions.  Returns
+        ``(path, call, cand, ordered)`` where *path* is the list of
+        ``(parent, child)`` edges from *expr* down to the call."""
+        result = None
+
+        def walk(node, path):
+            nonlocal result
+            if result is not None:
+                return
+            if isinstance(node, ast.Call):
+                matched = self._match_stmt_call(node)
+                if matched is not None:
+                    result = (list(path), node, *matched)
+                    return
+            for child, unconditional in _eval_children(node):
+                if result is not None:
+                    return
+                if not unconditional:
+                    continue
+                path.append((node, child))
+                walk(child, path)
+                path.pop()
+
+        walk(expr, [])
+        return result
+
+    def _provably_bound_func(self, name_node, parent) -> bool:
+        """A bare candidate name in a call's func slot is provably bound
+        (module-level def before this line, unshadowed), so its load can
+        safely move after the expansion without a NameError reordering."""
+        if not (
+            isinstance(parent, ast.Call)
+            and parent.func is name_node
+            and isinstance(name_node, ast.Name)
+        ):
+            return False
+        cand = self._candidates.get(name_node.id) or self._stmt_candidates.get(
+            name_node.id
         )
+        return (
+            cand is not None
+            and getattr(name_node, "lineno", 0) > cand.lineno
+            and not self._shadowed(cand.name)
+        )
+
+    def _expr_inline(self, stmt: ast.stmt, expr: ast.expr, setter):
+        """Inline one candidate call buried inside *expr*.
+
+        Every subtree the statement evaluates *before* the call becomes its
+        own temp, in evaluation order, so side effects and exceptions keep
+        their exact original positions -- purity is not required of the
+        prefix, only single evaluation, which a temp preserves.  Constants
+        need no temp, and neither does a provably-bound candidate name in
+        a func slot (keeping it a plain name lets the next fixpoint
+        iteration inline that call too)."""
+        if not (self._scope_kinds and self._scope_kinds[-1]):
+            return None
+        found = self._find_expr_call(expr)
+        if found is None:
+            return None
+        path, call, cand, ordered = found
+        # Prefix temps get their own site number so they can never collide
+        # with the parameter renames of the expansion's site.
+        site = self._site_counter
+        self._site_counter += 1
+        prefix: list[ast.stmt] = []
+        for parent, child in path:
+            for sibling, _ in _eval_children(parent):
+                if sibling is child:
+                    break
+                if isinstance(sibling, ast.Constant):
+                    continue
+                if self._provably_bound_func(sibling, parent):
+                    continue
+                temp = f"{_TEMP_PREFIX}_{site}_pfx{len(prefix)}"
+                prefix.append(
+                    ast.copy_location(
+                        ast.Assign(
+                            targets=[ast.Name(id=temp, ctx=ast.Store())],
+                            value=sibling,
+                        ),
+                        stmt,
+                    )
+                )
+                _replace_child(
+                    parent, sibling, ast.Name(id=temp, ctx=ast.Load())
+                )
+        prelude, ret = self._expand(cand, ordered, stmt)
+        ret = ast.copy_location(ret, call)
+        if path:
+            _replace_child(path[-1][0], call, ret)
+        else:
+            setter(ret)
+        out = [*prefix, *prelude, stmt]
+        ast.fix_missing_locations(ast.Module(body=out, type_ignores=[]))
         self.changes += 1
         return out
 
@@ -447,6 +648,11 @@ class FunctionInlining(ScopedTransformer):
         if node.value is None:
             return node
         replacement = self._stmt_inline(node, node.value)
+        if replacement is not None:
+            return replacement
+        replacement = self._expr_inline(
+            node, node.value, lambda new: setattr(node, "value", new)
+        )
         return replacement if replacement is not None else node
 
     def visit_Return(self, node: ast.Return):
@@ -458,4 +664,18 @@ class FunctionInlining(ScopedTransformer):
     def visit_Assign(self, node: ast.Assign):
         node = self.generic_visit(node)
         replacement = self._stmt_inline(node, node.value)
+        if replacement is not None:
+            return replacement
+        replacement = self._expr_inline(
+            node, node.value, lambda new: setattr(node, "value", new)
+        )
         return replacement if replacement is not None else node
+
+    def visit_If(self, node: ast.If):
+        node = self.generic_visit(node)
+        replacement = self._expr_inline(
+            node, node.test, lambda new: setattr(node, "test", new)
+        )
+        if replacement is not None:
+            return replacement
+        return node
