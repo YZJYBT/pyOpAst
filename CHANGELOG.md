@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 (2026-07-27)
+
+**修复:** 0.2.0 中 `opast -O3 script.py` / `opast --aggressive script.py`(README 的示例写法)会把脚本路径吞成选项值而报"缺少脚本路径";bench 的 `--aggressive 负载名` 同病。现在裸 `--aggressive`/`-O3` 在解析前改写为 `--aggressive=all`(该显式写法同时开放);改写止步于 `--` 与第一个位置参数,用户程序的 `sys.argv` 逐字节原样。空格传值形式(`--aggressive annotations`)不受影响。
+
+**文档:** 双语 README 补齐流水线顺序中的尾递归/模块层外提、四个激进层 bench 负载与 `--aggressive=all` 写法。
+
 ## 0.2.0 (2026-07-27)
 
 **新增:两层契约与 `--aggressive` / `-O3`。** 默认层保持"每条改写皆有静态证明";激进层每个选项以一条明确写出的假设换取更多优化,`--report` 逐条列出**实际生效**的假设(被 `--disable` 掉全部消费者的选项不虚报)。八个选项:

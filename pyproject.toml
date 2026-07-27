@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # Distribution/import/CLI name: opast ("OPtimizing AST"); GitHub repo: pyOpAst.
 name = "opast"
-version = "0.2.0"
+version = "0.2.1"
 description = "Conservative AST-level Python source optimizer: provably-semantics-preserving passes (folding, propagation, inlining, loop rewrites) with dynamic-code fallback, plus an opt-in numba JIT path."
 requires-python = ">=3.10"
 readme = "README.md"

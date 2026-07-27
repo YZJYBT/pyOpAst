@@ -29,7 +29,7 @@
 
 此外 LICM 与 CSE 支持**新鲜容器的 `len()` 缓存**:`len(x)` 可参与外提/合并,当且仅当 `x` 在函数内只绑定一次、右值是字面量/推导式/内置构造器(新鲜对象),且全程未逃逸——仅允许 `len(x)`、下标**读取** `x[...]`、`for ... in x`、裸 `if x:`/`while x:` 四类使用;任何传参、别名赋值、属性/方法访问(含 `x.append`)、下标写入、放进容器、return 等都取消资格(逃逸的引用意味着任何后续调用都可能变动容器)。另要求全模块无动态构造、`len` 及容器构造器名未在任何位置被绑定。自定义对象上的 `len`/重复调用**明确不缓存**(`__len__` 可以有副作用,语义不等价)。
 
-流水线按「去动态化 → 折叠 → 常量传播 → 代数化简 → 循环闭式折叠 → 条件事实收窄 → 死代码 → 下标循环转直接迭代 → 循环不变量外提 → 公共子表达式消除 → 未使用消除 → 内联 → 累加循环转推导式 → 推导式转 map → 全局名局部化」迭代到不动点(默认最多 8 轮;内联在前——能内联进推导式的简单函数比 map 更快,map 转换兜底接住不可内联的函数与内置;局部化垫底——让 inline/comp-to-map 先认领名字,comp-to-map 引入的 `map`/`filter` 由下一轮局部化接住):折叠喂给传播(`x = 2+3` 先折成 `x = 5` 再代入),传播喂给循环闭式折叠(`range(n)` 变 `range(1000)`)与代数化简、死代码(`if x:` 变 `if True:`),死代码释放最后一处使用后未使用消除接手,内联靠后——下一轮会折叠内联出的表达式、删除因此闲置的 helper 定义;loop-to-comp 排在内联之后、comp-to-map 之前,产出的推导式同轮即被 comp-to-map 接住。循环折叠出的常量又喂给下一轮的传播/内联,常量热核会逐轮向外坍缩(见 `loopfold` 负载)。
+流水线按「去动态化 → 折叠 → 常量传播 → 代数化简 → 循环闭式折叠 → 条件事实收窄 → 死代码 → 尾递归消除(需 `tail-calls`)→ 下标循环转直接迭代 → 循环不变量外提 → 公共子表达式消除 → 未使用消除 → 内联 → 累加循环转推导式 → 推导式转 map → 模块层热循环外提(需 `loop-state`)→ 全局名局部化」迭代到不动点(默认最多 8 轮;内联在前——能内联进推导式的简单函数比 map 更快,map 转换兜底接住不可内联的函数与内置;局部化垫底——让 inline/comp-to-map 先认领名字,comp-to-map 引入的 `map`/`filter` 由下一轮局部化接住):折叠喂给传播(`x = 2+3` 先折成 `x = 5` 再代入),传播喂给循环闭式折叠(`range(n)` 变 `range(1000)`)与代数化简、死代码(`if x:` 变 `if True:`),死代码释放最后一处使用后未使用消除接手,内联靠后——下一轮会折叠内联出的表达式、删除因此闲置的 helper 定义;loop-to-comp 排在内联之后、comp-to-map 之前,产出的推导式同轮即被 comp-to-map 接住。循环折叠出的常量又喂给下一轮的传播/内联,常量热核会逐轮向外坍缩(见 `loopfold` 负载)。
 
 ## 动态代码回退策略
 
@@ -63,6 +63,7 @@ opast --opt-imports-under src script.py   # 指定额外目录(可重复;与 --o
 ```powershell
 opast --aggressive script.py                  # 全部激进项
 opast -O3 script.py                           # 同义别名
+opast --aggressive=all script.py              # 显式写法,与上等价
 opast --aggressive=annotations script.py      # 只开指定项
 opast --aggressive --disable jit script.py    # 全开但排除某项
 ```
@@ -146,7 +147,7 @@ python -m opast.bench --jit daily      # 连同 jit pass 一起测(需 numba;预
 python -m opast.bench my_hot_script.py         # 也可测任意脚本(可选定义 RESULT 供校验)
 ```
 
-内置负载:`inline`(小函数热循环)、`inlinestmt`(多语句函数体的语句级内联)、`algebra`(可证明 int 的恒等式噪声)、`strength`(for-range 计数器上的强度削减与 `abs` 消除)、`dedynamize`(热循环里的常量 `eval`/`getattr`)、`licm`(热循环里的不变量表达式)、`lencache`(热循环里新鲜列表的 `len()`)、`rangeiter`(新鲜列表上的下标循环转直接迭代/enumerate)、`condnarrow`(热循环里可证死亡的守卫)、`looptocomp`(append 累加循环转推导式)、`loopfold`(常量边界纯 int 热核的优化期折叠与向外坍缩)、`comptomap`(内置函数上的推导式转 map/filter)、`localize`(热循环里的内置名/模块全局名局部化)、`mixed`(内联→折叠级联+死代码)、`daily`(日常风格的订单结算日报,单个脚本同时覆盖全部 pass 的实用测试点)、`jitlazy`(变量边界数值核,`--jit` 下验证运行期 lazy 触发,普通模式预期 ~1x)、`control`(无可优化项,预期 ~1.00x,验证零回归)。注意:纯常量折叠类优化(`1+2`、`"a"*3`)CPython 编译器自己也会做,opast 的运行时收益主要来自 CPython 不做的部分——内联、需类型证明的代数化简、去动态化。
+内置负载:`inline`(小函数热循环)、`inlinestmt`(多语句函数体的语句级内联)、`algebra`(可证明 int 的恒等式噪声)、`strength`(for-range 计数器上的强度削减与 `abs` 消除)、`dedynamize`(热循环里的常量 `eval`/`getattr`)、`licm`(热循环里的不变量表达式)、`lencache`(热循环里新鲜列表的 `len()`)、`rangeiter`(新鲜列表上的下标循环转直接迭代/enumerate)、`condnarrow`(热循环里可证死亡的守卫)、`looptocomp`(append 累加循环转推导式)、`loopfold`(常量边界纯 int 热核的优化期折叠与向外坍缩)、`comptomap`(内置函数上的推导式转 map/filter)、`localize`(热循环里的内置名/模块全局名局部化)、`mixed`(内联→折叠级联+死代码)、`daily`(日常风格的订单结算日报,单个脚本同时覆盖全部 pass 的实用测试点)、`jitlazy`(变量边界数值核,`--jit` 下验证运行期 lazy 触发,普通模式预期 ~1x)、`annotated`(带类型注解的数值核,`--aggressive=annotations` 下生效,默认 ~1x)、`fastmath`(浮点核,`--aggressive=fastmath` 下生效,默认 ~1x)、`tailrec`(累加器尾递归,`--aggressive=tail-calls` 下生效)、`control`(无可优化项,预期 ~1.00x,验证零回归)。注意:纯常量折叠类优化(`1+2`、`"a"*3`)CPython 编译器自己也会做,opast 的运行时收益主要来自 CPython 不做的部分——内联、需类型证明的代数化简、去动态化。
 
 Python API:
 

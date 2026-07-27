@@ -31,7 +31,7 @@ Three principles drive every pass:
 
 ## Optimization passes
 
-The pipeline iterates to a fixpoint (default ≤ 8 rounds): de-dynamize → folding → constant propagation → algebraic → loop-fold → cond-narrow → dead code → range-to-iter → LICM → CSE → unused → inline → loop-to-comp → comp-to-map → localize. Each pass feeds the next; collapsed constants cascade outward across iterations. See [README-ZH.md](README-ZH.md) for the full safety-condition spec of each pass.
+The pipeline iterates to a fixpoint (default ≤ 8 rounds): de-dynamize → folding → constant propagation → algebraic → loop-fold → cond-narrow → dead code → tail-recursion (needs `tail-calls`) → range-to-iter → LICM → CSE → unused → inline → loop-to-comp → comp-to-map → module-loop outlining (needs `loop-state`) → localize. Each pass feeds the next; collapsed constants cascade outward across iterations. See [README-ZH.md](README-ZH.md) for the full safety-condition spec of each pass.
 
 | Pass | What it does |
 | --- | --- |
@@ -64,6 +64,7 @@ exactly which bets are in play.
 ```powershell
 opast --aggressive script.py                  # everything below
 opast -O3 script.py                           # same thing
+opast --aggressive=all script.py              # explicit spelling of the same
 opast --aggressive=annotations script.py      # pick a subset
 opast --aggressive --disable jit script.py    # all but one
 ```
@@ -169,7 +170,7 @@ python -m opast.bench --jit daily
 python -m opast.bench --list
 ```
 
-17 built-in workloads, each executed twice per measurement (original vs optimized) in the same interpreter with GC disabled and a `RESULT` equality check. Note that CPython's own compiler already does trivial constant folding — opast's wins come from what CPython does *not* do: inlining, type-proven algebraic rewrites, loop rewrites, de-dynamization.
+20 built-in workloads, each executed twice per measurement (original vs optimized) in the same interpreter with GC disabled and a `RESULT` equality check. Several (`annotated`, `fastmath`, `tailrec`, `jitlazy`) are ~1.0x by default and only meaningful with the matching `--aggressive` option or `--jit`; `python -m opast.bench --aggressive ...` passes the options through. Note that CPython's own compiler already does trivial constant folding — opast's wins come from what CPython does *not* do: inlining, type-proven algebraic rewrites, loop rewrites, de-dynamization.
 
 ## IPython / Jupyter
 
