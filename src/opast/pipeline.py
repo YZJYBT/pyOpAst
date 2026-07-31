@@ -24,6 +24,7 @@ from .passes import (
     LoopToComprehension,
     ModuleLoopOutlining,
     RangeToIteration,
+    ScalarReplacement,
     TailRecursion,
     UnusedElimination,
 )
@@ -60,6 +61,10 @@ PASS_CLASSES = (
     CommonSubexpressionElimination,
     UnusedElimination,
     FunctionInlining,
+    # After inlining: an inlined constructor call or tuple return lands as
+    # a plain local aggregate this pass can then dissolve; the scalars it
+    # leaves behind feed const-prop / CSE / unused next iteration.
+    ScalarReplacement,
     LoopToComprehension,  # picks up range-to-iter output in the same pass
     ComprehensionToMap,
     # Late: every other pass gets to work on the loop while it is still a
@@ -154,6 +159,7 @@ _AGGRESSIVE_CONSUMERS = {
         AlgebraicSimplification,
         LoopFolding,
         FunctionInlining,
+        ScalarReplacement,
         ModuleLoopOutlining,
     ),
     "module-locals": (ModuleLoopOutlining,),

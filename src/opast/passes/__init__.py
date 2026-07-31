@@ -17,6 +17,7 @@ from .looptocomp import LoopToComprehension
 from .outline import ModuleLoopOutlining
 from .propagate import ConstantPropagation
 from .rangeiter import RangeToIteration
+from .scalarrepl import ScalarReplacement
 from .tailcall import TailRecursion
 from .unused import UnusedElimination
 
@@ -34,6 +35,7 @@ __all__ = [
     "CommonSubexpressionElimination",
     "UnusedElimination",
     "FunctionInlining",
+    "ScalarReplacement",
     "TailRecursion",
     "RangeToIteration",
     "LoopToComprehension",

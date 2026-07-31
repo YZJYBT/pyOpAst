@@ -76,12 +76,26 @@ from ..safety import (
     tree_has_dynamic,
 )
 from .base import ScopedTransformer
+from .folding import _const_size
 
 _PROPAGATE_TYPES = (int, float, complex, bool, str, bytes, type(None), type(...))
 _MAX_SEQ = 128
 #: With the aggressive ``budgets`` option, duplicating longer string/bytes
 #: constants into their use sites is considered worth the source growth.
 _GENEROUS_SEQ = 8192
+
+
+def _propagatable(value, max_seq: int) -> bool:
+    """Whether duplicating *value* into use sites is acceptable.  Constant
+    tuples (produced by the folding pass) count, guarded by the same
+    footprint metric folding uses."""
+    if type(value) is tuple:
+        return _const_size(value) <= max_seq
+    if type(value) not in _PROPAGATE_TYPES:
+        return False
+    if isinstance(value, (str, bytes)) and len(value) > max_seq:
+        return False
+    return True
 
 
 def _direct_nested_scopes(node: ast.AST):
@@ -115,6 +129,19 @@ def _constant_pairs(stmt: ast.stmt) -> list[tuple[str, ast.Constant]]:
             and all(isinstance(e, ast.Constant) for e in value.elts)
         ):
             return [(t.id, v) for t, v in zip(target.elts, value.elts)]
+        if (
+            isinstance(target, (ast.Tuple, ast.List))
+            and isinstance(value, ast.Constant)
+            and type(value.value) is tuple
+            and len(target.elts) == len(value.value)
+            and all(isinstance(e, ast.Name) for e in target.elts)
+        ):
+            # Folding collapsed the constant display into one tuple
+            # constant; the unpack still binds each name to a constant.
+            return [
+                (t.id, ast.copy_location(ast.Constant(v), value))
+                for t, v in zip(target.elts, value.value)
+            ]
     elif (
         isinstance(stmt, ast.AnnAssign)
         and isinstance(stmt.target, ast.Name)
@@ -336,9 +363,7 @@ class ConstantPropagation(ScopedTransformer):
         candidates: dict[str, tuple[int, ast.Constant]] = {}
         for idx, stmt in enumerate(scope.body):
             for name, value in _constant_pairs(stmt):
-                if type(value.value) not in _PROPAGATE_TYPES:
-                    continue
-                if isinstance(value.value, (str, bytes)) and len(value.value) > self._max_seq:
+                if not _propagatable(value.value, self._max_seq):
                     continue
                 if counts[name] != 1:
                     continue
@@ -455,12 +480,7 @@ class ConstantPropagation(ScopedTransformer):
             for name, const in _constant_pairs(stmt):
                 if name in self._forbidden:
                     continue
-                if type(const.value) not in _PROPAGATE_TYPES:
-                    continue
-                if (
-                    isinstance(const.value, (str, bytes))
-                    and len(const.value) > self._max_seq
-                ):
+                if not _propagatable(const.value, self._max_seq):
                     continue
                 consts[name] = const
                 copies.pop(name, None)

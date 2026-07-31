@@ -670,10 +670,12 @@ def verify_cse_lencache() -> Area:
     )
     assert_same_output(area, len_loop)
     s = show(len_loop)
-    if s.returncode != 0 or "_opast_inv_" not in s.stdout or "len(data)" not in s.stdout or "while i < 4" not in s.stdout:
-        area.fail("LICM did not hoist fresh-container len expression out of loop", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(len_loop)]))
-    elif "total = total + len(data)" in s.stdout:
-        area.fail("fresh-container len expression remained in loop body after LICM", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(len_loop)]))
+    if s.returncode != 0 or "while i < 4" not in s.stdout:
+        area.fail("fresh-container len loop did not optimize cleanly", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(len_loop)]))
+    elif "len(data)" in s.stdout:
+        area.fail("fresh-container len expression remained after LICM/scalar replacement", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(len_loop)]))
+    elif "_opast_inv_" not in s.stdout and "total = total + 4 + 4" not in s.stdout:
+        area.fail("fresh-container len was neither hoisted nor scalar-folded", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(len_loop)]))
 
     len_cse = write_case(
         "lencache_cse_block",
@@ -2266,6 +2268,190 @@ def verify_cross_scope_constprop() -> Area:
     return area
 
 
+def verify_scalar_replacement() -> Area:
+    area = Area("scalar replacement")
+
+    positive = write_case(
+        "scalarrepl_positive",
+        """
+        events = []
+        def mark(value):
+            events.append(value)
+            return value
+        class Point:
+            def __init__(self, x, y=4):
+                self.x = x
+                self.y = y + 1
+        def f(v):
+            pair = (mark(v), mark(v + 1))
+            items = [mark(v + 2), mark(v + 3)]
+            items[0] = items[1] + 10
+            point = Point(mark(v + 4))
+            point.x = point.x + 1
+            return pair[0] + pair[-1] + len(pair) + items[0] + point.x + point.y
+        print(f(2), events)
+        """,
+    )
+    assert_same_output(area, positive)
+    s = show(positive)
+    if s.returncode != 0 or "_opast_sr" not in s.stdout:
+        area.fail(
+            "tuple/list/simple-class aggregates were not scalar-replaced",
+            command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(positive)]),
+        )
+
+    regressions = {
+        "scalarrepl_temp_collision": """
+            import sys
+            def f(v):
+                _opast_sr0_t_0 = v * 10
+                t = (v + 1,)
+                return t[0] + _opast_sr0_t_0
+            print(f(int(sys.argv[1])))
+        """,
+        "scalarrepl_conditional_binding": """
+            def f(flag, value):
+                if flag:
+                    t = (value, value + 1)
+                return len(t)
+            try:
+                print(f(False, 3))
+            except Exception as exc:
+                print(type(exc).__name__)
+        """,
+        "scalarrepl_class_mutation": """
+            class Point:
+                def __init__(self, x):
+                    self.x = x
+            def replacement(self, x):
+                self.x = x + 100
+            Point.__init__ = replacement
+            def f():
+                point = Point(1)
+                return point.x
+            print(f())
+        """,
+        "scalarrepl_rejected_uses": """
+            def tuple_store(value):
+                t = (value,)
+                try:
+                    t[0] += 1
+                except Exception as exc:
+                    return type(exc).__name__
+            def dynamic_index(value, index):
+                t = (value, value + 1)
+                return t[index]
+            def escaped(value):
+                t = (value,)
+                return t
+            def closure(value):
+                t = (value,)
+                return lambda: t[0]
+            print(tuple_store(2), dynamic_index(3, 1), escaped(4), closure(5)())
+        """,
+        "scalarrepl_shadowed_len": """
+            def f(value):
+                len = lambda obj: 99
+                t = (value, value + 1)
+                return len(t)
+            print(f(3))
+        """,
+    }
+    for name, source in regressions.items():
+        path = write_case(name, source)
+        assert_same_output(area, path, "3")
+
+    return area
+
+
+def verify_constant_containers() -> Area:
+    area = Area("constant containers")
+
+    folds = write_case(
+        "constant_containers_fold",
+        """
+        def f():
+            values = (10, 20, (30, 40))
+            a, b, nested = values
+            return (
+                values[0], values[-1], values[1:], len(values),
+                20 in values, 99 not in values, values < (11,),
+                a + b + nested[0],
+            )
+        print(f())
+        """,
+    )
+    assert_same_output(area, folds)
+    s = show(folds)
+    if s.returncode != 0 or any(
+        token in s.stdout for token in ("values[", "len(values)", " in values")
+    ):
+        area.fail(
+            "constant tuple subscript/len/membership propagation did not fold",
+            command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(folds)]),
+        )
+
+    call_order = write_case(
+        "constant_containers_call_unpack",
+        """
+        events = []
+        def mark(value):
+            events.append(value)
+            return value
+        def collect(*args, **kwargs):
+            return args, kwargs
+        print(collect(*[mark(1), mark(2)], **{'x': mark(3), 'y': mark(4)}), events)
+        """,
+    )
+    assert_same_output(area, call_order)
+    s = show(call_order)
+    if s.returncode != 0 or "*[" in s.stdout or "**{" in s.stdout:
+        area.fail(
+            "literal call unpacking was not flattened",
+            command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(call_order)]),
+        )
+
+    rejected = {
+        "constant_containers_duplicate_keyword": """
+            events = []
+            def mark(value):
+                events.append(value)
+                return value
+            def f(**kwargs):
+                return kwargs
+            try:
+                f(**{'x': mark(1)}, x=mark(2))
+            except Exception as exc:
+                print(type(exc).__name__, events)
+        """,
+        "constant_containers_bad_keyword": """
+            def f(**kwargs):
+                return kwargs
+            print(f(**{'not-valid': 1, 'class': 2}))
+        """,
+        "constant_containers_shadowed_len": """
+            def f():
+                len = lambda value: 77
+                values = (1, 2)
+                return len(values)
+            print(f())
+        """,
+        "constant_containers_bad_subscript": """
+            values = (1, 2)
+            for index in (9, 'x'):
+                try:
+                    print(values[index])
+                except Exception as exc:
+                    print(type(exc).__name__)
+        """,
+    }
+    for name, source in rejected.items():
+        path = write_case(name, source)
+        assert_same_output(area, path)
+
+    return area
+
+
 def verify_dynamic_fallback() -> Area:
     area = Area("dynamic fallback")
     samples = {
@@ -2341,6 +2527,8 @@ def main() -> int:
         verify_inline_statement_regressions(),
         verify_strength_interval_regressions(),
         verify_cross_scope_constprop(),
+        verify_scalar_replacement(),
+        verify_constant_containers(),
         verify_dynamic_fallback(),
         verify_cli(),
     ]
