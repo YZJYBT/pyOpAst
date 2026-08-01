@@ -1,10 +1,12 @@
 """Benchmark harness: ``python -m opast.bench [--repeat N] [workload ...]``.
 
-For every workload the harness compiles the original source and the
-opast-optimized AST, executes both in this interpreter ``--repeat`` times
-each (fresh globals, GC disabled during timing), verifies that both variants
-produce the same module-level ``RESULT``, and reports best-of-N wall times,
-the speedup, the one-off optimization cost and the number of AST changes.
+Every workload is measured in two modes -- **default** (proof-backed passes
+only) and **aggressive** (``-O3``: every assumption-backed option, jit
+included) -- each against the original source in the same interpreter
+(fresh globals, GC disabled during timing).  Both variants of both modes
+must produce the same module-level ``RESULT``.  ``--mode`` restricts the
+run to a single mode, which also switches to a more detailed per-mode
+table (optimization cost, change counts).
 """
 
 from __future__ import annotations
@@ -17,12 +19,21 @@ import sys
 import time
 from pathlib import Path
 
-from ..pipeline import optimize_source, rewrite_aggressive_argv
+from ..pipeline import optimize_source
 from ..runner import _materialize_source
 
 WORKLOAD_DIR = Path(__file__).resolve().parent / "workloads"
 
 _MISSING = object()
+
+#: Mode name -> optimize_source keyword arguments.  Aggressive turns on
+#: every assumption-backed option; ``jit`` rides along both through the
+#: option set and explicitly (the flag also selects source
+#: materialization, which numba's inspect-based source retrieval needs).
+MODES = {
+    "default": {"jit": False, "aggressive": ()},
+    "aggressive": {"jit": True, "aggressive": True},
+}
 
 
 def discover(selection: list[str]) -> list[Path]:
@@ -99,28 +110,72 @@ def bench_one(path: Path, repeat: int, jit: bool = False, aggressive=()) -> dict
     }
 
 
+def _single_header() -> str:
+    return (f"{'workload':<12} {'original':>10} {'optimized':>10} "
+            f"{'speedup':>8} {'opt-cost':>9} {'changes':>8}  result")
+
+
+def _single_row(row: dict, mode: str) -> str:
+    r = row[mode]
+    return (
+        f"{row['name']:<12} "
+        f"{r['orig_best'] * 1000:>8.1f}ms "
+        f"{r['opt_best'] * 1000:>8.1f}ms "
+        f"{r['speedup']:>7.2f}x "
+        f"{r['optimize_cost'] * 1000:>7.1f}ms "
+        f"{r['changes']:>8} "
+        f" {'OK' if r['results_match'] else 'MISMATCH!'}"
+    )
+
+
+def _both_header() -> str:
+    return (f"{'workload':<12} {'original':>10} {'default':>10} "
+            f"{'speedup':>8} {'aggressive':>11} {'speedup':>8} "
+            f"{'changes':>8}  result")
+
+
+def _both_row(row: dict) -> str:
+    d, a = row["default"], row["aggressive"]
+    ok = d["results_match"] and a["results_match"]
+    return (
+        f"{row['name']:<12} "
+        f"{d['orig_best'] * 1000:>8.1f}ms "
+        f"{d['opt_best'] * 1000:>8.1f}ms "
+        f"{d['speedup']:>7.2f}x "
+        f"{a['opt_best'] * 1000:>9.1f}ms "
+        f"{a['speedup']:>7.2f}x "
+        f"{str(d['changes']) + '/' + str(a['changes']):>8} "
+        f" {'OK' if ok else 'MISMATCH!'}"
+    )
+
+
+def _geomean(rows: list[dict], mode: str) -> float:
+    return math.exp(
+        statistics.mean(math.log(row[mode]["speedup"]) for row in rows)
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m opast.bench",
-        description="Compare opast-optimized execution against plain CPython.",
+        description="Compare opast-optimized execution against plain CPython "
+                    "in the default (proof-backed) and aggressive (-O3, jit "
+                    "included) modes.",
     )
     parser.add_argument("workloads", nargs="*",
                         help="workload names or .py paths (default: all built-in)")
     parser.add_argument("-r", "--repeat", type=int, default=3,
                         help="timed runs per variant (default: %(default)s)")
-    parser.add_argument("--jit", action="store_true",
-                        help="run the jit pass too (requires numba; the "
-                             "warmup run absorbs import + compile cost)")
-    parser.add_argument("--aggressive", nargs="?", const=True, default=None,
-                        metavar="OPTIONS",
-                        help="enable assumption-backed optimization (bare "
-                             "flag = all; see the main CLI)")
+    parser.add_argument("--mode", choices=("both", "default", "aggressive"),
+                        default="both",
+                        help="which tier(s) to measure (default: %(default)s; "
+                             "aggressive enables every -O3 option, jit "
+                             "included -- numba recommended, the warmup run "
+                             "absorbs import + compile cost)")
     parser.add_argument("--list", action="store_true",
                         help="list built-in workloads and exit")
     argv = sys.argv[1:] if argv is None else list(argv)
-    ns = parser.parse_args(
-        rewrite_aggressive_argv(argv, frozenset({"-r", "--repeat"}))
-    )
+    ns = parser.parse_args(argv)
 
     if ns.list:
         for path in discover([]):
@@ -129,39 +184,34 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{path.stem:<12} {summary}")
         return 0
 
+    modes = ["default", "aggressive"] if ns.mode == "both" else [ns.mode]
     paths = discover(ns.workloads)
     print(f"Python {sys.version.split()[0]} | {len(paths)} workload(s) | "
-          f"best of {ns.repeat} run(s) per variant"
-          f"{' | jit' if ns.jit else ''}"
-          f"{' | aggressive' if ns.aggressive else ''}\n")
+          f"best of {ns.repeat} run(s) per variant | "
+          f"mode: {' + '.join(modes)}\n")
 
-    header = (f"{'workload':<12} {'original':>10} {'optimized':>10} "
-              f"{'speedup':>8} {'opt-cost':>9} {'changes':>8}  result")
+    both = len(modes) == 2
+    header = _both_header() if both else _single_header()
     print(header)
     print("-" * len(header))
 
     rows = []
     all_match = True
     for path in paths:
-        row = bench_one(
-            path, ns.repeat, jit=ns.jit, aggressive=ns.aggressive or ()
-        )
+        row = {"name": path.stem}
+        for mode in modes:
+            row[mode] = bench_one(path, ns.repeat, **MODES[mode])
+            all_match &= row[mode]["results_match"]
         rows.append(row)
-        all_match &= row["results_match"]
-        print(
-            f"{row['name']:<12} "
-            f"{row['orig_best'] * 1000:>8.1f}ms "
-            f"{row['opt_best'] * 1000:>8.1f}ms "
-            f"{row['speedup']:>7.2f}x "
-            f"{row['optimize_cost'] * 1000:>7.1f}ms "
-            f"{row['changes']:>8} "
-            f" {'OK' if row['results_match'] else 'MISMATCH!'}"
-        )
+        print(_both_row(row) if both else _single_row(row, modes[0]))
 
     if len(rows) > 1:
-        geo = math.exp(statistics.mean(math.log(r["speedup"]) for r in rows))
         print("-" * len(header))
-        print(f"{'geomean':<12} {'':>10} {'':>10} {geo:>7.2f}x")
+        if both:
+            print(f"geomean: default {_geomean(rows, 'default'):.2f}x | "
+                  f"aggressive {_geomean(rows, 'aggressive'):.2f}x")
+        else:
+            print(f"geomean: {_geomean(rows, modes[0]):.2f}x")
 
     if not all_match:
         print("\nopast.bench: RESULT mismatch detected -- optimizer bug!",

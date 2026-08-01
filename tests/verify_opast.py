@@ -229,7 +229,12 @@ def verify_benchmark() -> Area:
     if listed.returncode != 0 or not expected.issubset({line.split()[0] for line in listed.stdout.splitlines() if line.strip()}):
         area.fail("--list did not report all built-in workloads", command_text([*bench_cmd, "--list"]))
 
-    pattern = re.compile(r"^(algebra|control|dedynamize|inline|mixed|licm|lencache|comptomap)\s+.*?\s+([0-9.]+)x\s+.*?\s+(\d+)\s+(OK|MISMATCH!)$", re.M)
+    names = "algebra|control|dedynamize|inline|mixed|licm|lencache|comptomap"
+    both_pattern = re.compile(
+        rf"^({names})\s+.*?\s+([0-9.]+)x\s+.*?\s+([0-9.]+)x\s+"
+        r"(\d+)/(\d+)\s+(OK|MISMATCH!)$",
+        re.M,
+    )
     rows = {}
     cp = None
     timing_errors: list[str] = []
@@ -238,40 +243,55 @@ def verify_benchmark() -> Area:
         if cp.returncode != 0:
             timing_errors = [f"benchmark -r 2 exited non-zero: {cp.stderr!r}"]
             continue
-        rows = {
-            name: {"speedup": float(speedup), "changes": int(changes), "result": result}
-            for name, speedup, changes, result in pattern.findall(cp.stdout)
-        }
+        rows = {}
+        for name, default_speedup, aggressive_speedup, default_changes, aggressive_changes, result in both_pattern.findall(cp.stdout):
+            rows[name] = {
+                "default_speedup": float(default_speedup),
+                "aggressive_speedup": float(aggressive_speedup),
+                "default_changes": int(default_changes),
+                "aggressive_changes": int(aggressive_changes),
+                "result": result,
+            }
         timing_errors = []
         if set(rows) != expected:
-            timing_errors.append(f"benchmark did not report exactly all 5 workload rows: {sorted(rows)}")
+            timing_errors.append(f"benchmark did not report expected two-mode workload rows: {sorted(rows)}")
         for name in expected:
             if rows.get(name, {}).get("result") != "OK":
                 timing_errors.append(f"{name} workload result was not OK")
         if "control" in rows:
-            if rows["control"]["changes"] != 0:
-                timing_errors.append("control workload did not report 0 changes")
-            if not (0.9 <= rows["control"]["speedup"] <= 1.1):
-                timing_errors.append(f"control speedup {rows['control']['speedup']:.2f}x outside 0.9-1.1")
+            if rows["control"]["default_changes"] != 0:
+                timing_errors.append("control workload did not report 0 default changes")
+            if not (0.9 <= rows["control"]["default_speedup"] <= 1.1):
+                timing_errors.append(f"control default speedup {rows['control']['default_speedup']:.2f}x outside 0.9-1.1")
         for name in ("dedynamize", "inline", "mixed", "algebra", "licm", "lencache", "comptomap"):
-            if name in rows and rows[name]["speedup"] <= 1.0:
-                timing_errors.append(f"{name} speedup was not >1x: {rows[name]['speedup']:.2f}x")
+            if name in rows and rows[name]["default_speedup"] <= 1.0:
+                timing_errors.append(f"{name} default speedup was not >1x: {rows[name]['default_speedup']:.2f}x")
+        if "geomean: default" not in cp.stdout or "aggressive" not in cp.stdout:
+            timing_errors.append("benchmark did not print per-mode geomeans")
         if not timing_errors:
             break
     for err in timing_errors:
         area.fail(err, command_text([*bench_cmd, "-r", "2"]))
 
-    single = run([*bench_cmd, "-r", "2", "inline"])
-    if single.returncode != 0 or "inline" not in single.stdout or " OK" not in single.stdout or "1 workload(s)" not in single.stdout:
-        area.fail("single workload selection by name failed", command_text([*bench_cmd, "-r", "2", "inline"]))
+    single = run([*bench_cmd, "--mode", "default", "-r", "2", "inline"])
+    if single.returncode != 0 or "mode: default" not in single.stdout or "inline" not in single.stdout or " OK" not in single.stdout or "1 workload(s)" not in single.stdout or "opt-cost" not in single.stdout:
+        area.fail("single default-mode workload selection failed", command_text([*bench_cmd, "--mode", "default", "-r", "2", "inline"]))
+
+    aggressive = run([*bench_cmd, "--mode", "aggressive", "-r", "1", "annotated"])
+    if aggressive.returncode != 0 or "mode: aggressive" not in aggressive.stdout or "annotated" not in aggressive.stdout or " OK" not in aggressive.stdout:
+        area.fail("single aggressive-mode workload selection failed", command_text([*bench_cmd, "--mode", "aggressive", "-r", "1", "annotated"]))
+
+    old_flags = run([*bench_cmd, "--jit", "control"])
+    if old_flags.returncode == 0:
+        area.fail("benchmark still accepted removed --jit flag instead of --mode aggressive", command_text([*bench_cmd, "--jit", "control"]))
 
     external = write_case("bench_external", "total = 0\nfor i in range(1000):\n    total += i\nRESULT = total\n")
-    ext = run([*bench_cmd, "-r", "2", str(external)])
+    ext = run([*bench_cmd, "--mode", "both", "-r", "1", str(external)])
     if ext.returncode != 0 or "bench_external" not in ext.stdout or " OK" not in ext.stdout:
-        area.fail("external .py workload path failed", command_text([*bench_cmd, "-r", "2", str(external)]))
+        area.fail("external .py workload path failed", command_text([*bench_cmd, "--mode", "both", "-r", "1", str(external)]))
 
     harness = (ROOT / "src" / "opast" / "bench" / "__main__.py").read_text(encoding="utf-8")
-    methodology_terms = ["Warmup runs double as the correctness check", "gc.disable()", "for _ in range(repeat):", "orig_times.append", "opt_times.append", "min(orig_times)"]
+    methodology_terms = ["Warmup runs double as the correctness check", "gc.disable()", "for _ in range(repeat):", "orig_times.append", "opt_times.append", "min(orig_times)", '"aggressive": {"jit": True, "aggressive": True}']
     for term in methodology_terms:
         if term not in harness:
             area.fail(f"benchmark methodology check missing {term!r}", str(ROOT / "src" / "opast" / "bench" / "__main__.py"))
@@ -2452,6 +2472,137 @@ def verify_constant_containers() -> Area:
     return area
 
 
+def verify_batch_build() -> Area:
+    area = Area("batch build")
+    build_cmd = [PYTHON, "-m", "opast.build"]
+
+    tmp_root = CASE_DIR / f"batch_build_workspace_{os.getpid()}"
+    tmp_root.mkdir(parents=True, exist_ok=True)
+    unique = len(list(tmp_root.iterdir()))
+    tmp_root = tmp_root / str(unique)
+    tmp_root.mkdir()
+    if True:
+        src = tmp_root / "src"
+        src.mkdir()
+        (src / "lib.py").write_text(
+            textwrap.dedent(
+                """
+                import math
+                PUBLIC = math.floor(2.9)
+                def exported(value):
+                    return math.floor(value) + PUBLIC
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        (src / "main.py").write_text(
+            textwrap.dedent(
+                """
+                def run():
+                    dead = 1 + 2
+                    return 1 + 2
+                print("main", run())
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        (src / "tool.py").write_text(
+            "#!/usr/bin/env python\nprint(1 + 2)\n",
+            encoding="utf-8",
+        )
+        (src / "data.txt").write_text("payload\n", encoding="utf-8")
+        (src / "bad.py").write_text("def broken(:\n", encoding="utf-8")
+        skipped = src / "skipme"
+        skipped.mkdir()
+        (skipped / "ignored.py").write_text("raise RuntimeError('no')\n", encoding="utf-8")
+
+        out = tmp_root / "out"
+        cp = run([
+            *build_cmd,
+            str(src),
+            "-o",
+            str(out),
+            "--entry",
+            "main.py",
+            "--exclude",
+            "skipme",
+            "--report",
+        ])
+        if cp.returncode != 0:
+            area.fail("directory batch build failed", command_text([*build_cmd, str(src), "-o", str(out), "--entry", "main.py", "--exclude", "skipme", "--report"]))
+        else:
+            if "fallback(s)" not in cp.stdout or "bad.py" not in cp.stderr:
+                area.fail("non-strict build did not report syntax fallback", command_text([*build_cmd, str(src), "-o", str(out), "--entry", "main.py", "--exclude", "skipme", "--report"]))
+            if (out / "data.txt").read_text(encoding="utf-8") != "payload\n":
+                area.fail("batch build did not copy non-Python files verbatim")
+            if (out / "skipme").exists():
+                area.fail("--exclude directory was copied into build output")
+            if not (out / "tool.py").read_text(encoding="utf-8").startswith("#!/usr/bin/env python\n"):
+                area.fail("batch build did not preserve shebang")
+            lib = (out / "lib.py").read_text(encoding="utf-8")
+            if "import math" not in lib or "def exported" not in lib or "PUBLIC" not in lib:
+                area.fail("library-mode build removed public top-level names/imports")
+            main = (out / "main.py").read_text(encoding="utf-8")
+            if "dead" in main or "'main', 3" not in main:
+                area.fail("--entry did not restore script-mode cleanup/folding")
+            if (out / "bad.py").read_text(encoding="utf-8") != "def broken(:\n":
+                area.fail("fallback file was not copied unchanged")
+
+        strict_out = tmp_root / "strict-out"
+        strict = run([*build_cmd, str(src), "-o", str(strict_out), "--strict"])
+        if strict.returncode == 0 or "fallback" not in strict.stdout:
+            area.fail("--strict did not make fallback fatal", command_text([*build_cmd, str(src), "-o", str(strict_out), "--strict"]))
+
+        depfree_src = tmp_root / "depfree.py"
+        depfree_src.write_text(
+            textwrap.dedent(
+                """
+                def hot(n):
+                    total = 0
+                    for i in range(12000):
+                        total += i + n
+                    return total
+                print(hot(3))
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        depfree_out = tmp_root / "depfree_out.py"
+        depfree = run([*build_cmd, str(depfree_src), "-o", str(depfree_out), "-O3", "--disable", "jit"])
+        if depfree.returncode != 0:
+            area.fail("-O3 --disable jit single-file build failed", command_text([*build_cmd, str(depfree_src), "-o", str(depfree_out), "-O3", "--disable", "jit"]))
+        elif "opast.jitsupport" in depfree_out.read_text(encoding="utf-8"):
+            area.fail("-O3 --disable jit emitted an opast runtime dependency")
+
+        same_output = run([*build_cmd, str(src), "-o", str(src)])
+        if same_output.returncode == 0 or "outside the source directory" not in same_output.stderr:
+            area.fail("batch build allowed output inside the source tree", command_text([*build_cmd, str(src), "-o", str(src)]))
+
+        hook_root = tmp_root / "hookroot"
+        hook_root.mkdir()
+        (hook_root / "hookmod.py").write_text(
+            "PUBLIC = 3\n\ndef exported():\n    return PUBLIC\n",
+            encoding="utf-8",
+        )
+        hook_probe = (
+            "import os, sys\n"
+            "from pathlib import Path\n"
+            "from opast.importhook import install, uninstall\n"
+            f"root = Path({str(hook_root)!r})\n"
+            "sys.path.insert(0, str(root))\n"
+            "finder = install([root], aggressive=True)\n"
+            "print('module-locals' in finder._options.aggressive)\n"
+            "import hookmod\n"
+            "print(hasattr(hookmod, 'exported'), hookmod.exported())\n"
+            "uninstall(finder)\n"
+        )
+        hook = run([PYTHON, "-c", hook_probe])
+        if hook.returncode != 0 or hook.stdout.splitlines() != ["False", "True 3"]:
+            area.fail("import hook did not force module-locals off for library modules", command_text([PYTHON, "-c", hook_probe]))
+
+    return area
+
+
 def verify_dynamic_fallback() -> Area:
     area = Area("dynamic fallback")
     samples = {
@@ -2529,6 +2680,7 @@ def main() -> int:
         verify_cross_scope_constprop(),
         verify_scalar_replacement(),
         verify_constant_containers(),
+        verify_batch_build(),
         verify_dynamic_fallback(),
         verify_cli(),
     ]

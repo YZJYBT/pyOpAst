@@ -167,12 +167,23 @@ A `sys.meta_path` hook runs imported modules through the full pipeline before co
 ## Benchmarks
 
 ```powershell
-python -m opast.bench            # all built-in workloads, best-of-3, results verified identical
-python -m opast.bench --jit daily
+python -m opast.bench            # all built-in workloads, both modes, best-of-3, results verified identical
+python -m opast.bench --mode default daily     # one tier only (detailed table: opt-cost, changes)
+python -m opast.bench --mode aggressive -r 5
 python -m opast.bench --list
 ```
 
-21 built-in workloads, each executed twice per measurement (original vs optimized) in the same interpreter with GC disabled and a `RESULT` equality check. Several (`annotated`, `fastmath`, `tailrec`, `attrhoist`, `jitlazy`) are ~1.0x by default and only meaningful with the matching `--aggressive` option or `--jit`; `python -m opast.bench --aggressive ...` passes the options through. Note that CPython's own compiler already does trivial constant folding — opast's wins come from what CPython does *not* do: inlining, type-proven algebraic rewrites, loop rewrites, de-dynamization.
+21 built-in workloads, each measured in **two modes** — default (proof-backed passes only) and aggressive (`-O3`: every assumption-backed option, jit included; numba recommended, the warmup run absorbs import + compile cost) — in the same interpreter with GC disabled and a `RESULT` equality check per variant. One combined table with both speedups and per-mode geomeans; several workloads (`annotated`, `fastmath`, `tailrec`, `jitlazy`) are ~1.0x in the default tier by design and show their real numbers in the aggressive column. Note that CPython's own compiler already does trivial constant folding — opast's wins come from what CPython does *not* do: inlining, type-proven algebraic rewrites, loop rewrites, de-dynamization.
+
+## Batch build (PyInstaller & co)
+
+```powershell
+python -m opast.build src/ -o build_opt/ --entry main.py   # optimize a whole tree
+pyinstaller build_opt/main.py                              # freeze the optimized tree
+python -m opast.build src/ -o build_opt/ -O3 --disable jit # aggressive, still dependency-free
+```
+
+Optimizes every `.py` under a directory into a mirrored output tree (other files copied verbatim; `__pycache__`/VCS dirs skipped, `--exclude` adds more). A file the optimizer cannot process is copied unchanged with a warning — the build never breaks (`--strict` makes fallbacks fatal instead). Directory builds treat every file as a **library module** — its whole top level is public API, so unused-elimination and the aggressive `module-locals` option stay off (the import-hook contract, which now enforces the same); mark entry scripts with `--entry` for full script-mode cleanup. The default tier emits plain Python with **no runtime dependency on opast**, which is what makes the output suitable for freezing; `--jit` output imports `opast.jitsupport` at runtime — bundle opast and numba if you freeze it. Comments and formatting are not preserved (a leading `#!` shebang is); line numbers shift.
 
 ## IPython / Jupyter
 

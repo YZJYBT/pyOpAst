@@ -139,17 +139,18 @@ def integrate(steps: int, dt: float) -> float:
 - 被优化模块内的 traceback 行号按优化后布局显示(文件路径仍指原 `.py`);优化失败的模块自动回退为原样导入,绝不阻断导入。
 - Python API:`from opast.importhook import install, uninstall`。
 
-基准测试(优化后 vs 纯 CPython,同解释器内计时、GC 关闭、校验两版本计算结果一致):
+基准测试(优化后 vs 纯 CPython,同解释器内计时、GC 关闭、校验各版本计算结果一致)。默认一次测**两种模式**——普通(仅证明背书的默认层)与激进(`-O3` 全部选项、含 jit;建议装 numba,预热轮吸收 import+编译)——合并一张表、各出 geomean:
 
 ```powershell
-python -m opast.bench            # 全部内置负载,每变体 best-of-3
+python -m opast.bench            # 全部内置负载 × 两种模式,每变体 best-of-3
 python -m opast.bench -r 5 inline dedynamize   # 指定负载与重复次数
+python -m opast.bench --mode default daily     # 只测单一模式(表格更细:优化耗时、改写数)
+python -m opast.bench --mode aggressive
 python -m opast.bench --list     # 列出内置负载
-python -m opast.bench --jit daily      # 连同 jit pass 一起测(需 numba;预热轮吸收 import+编译)
 python -m opast.bench my_hot_script.py         # 也可测任意脚本(可选定义 RESULT 供校验)
 ```
 
-内置负载:`inline`(小函数热循环)、`inlinestmt`(多语句函数体的语句级内联)、`algebra`(可证明 int 的恒等式噪声)、`strength`(for-range 计数器上的强度削减与 `abs` 消除)、`dedynamize`(热循环里的常量 `eval`/`getattr`)、`licm`(热循环里的不变量表达式)、`lencache`(热循环里新鲜列表的 `len()`)、`rangeiter`(新鲜列表上的下标循环转直接迭代/enumerate)、`condnarrow`(热循环里可证死亡的守卫)、`looptocomp`(append 累加循环转推导式)、`loopfold`(常量边界纯 int 热核的优化期折叠与向外坍缩)、`comptomap`(内置函数上的推导式转 map/filter)、`localize`(热循环里的内置名/模块全局名局部化)、`mixed`(内联→折叠级联+死代码)、`daily`(日常风格的订单结算日报,单个脚本同时覆盖全部 pass 的实用测试点)、`jitlazy`(变量边界数值核,`--jit` 下验证运行期 lazy 触发,普通模式预期 ~1x)、`annotated`(带类型注解的数值核,`--aggressive=annotations` 下生效,默认 ~1x)、`fastmath`(浮点核,`--aggressive=fastmath` 下生效,默认 ~1x)、`tailrec`(累加器尾递归,`--aggressive=tail-calls` 下生效)、`attrhoist`(循环不变属性链,`--aggressive=attrs` 下生效)、`control`(无可优化项,预期 ~1.00x,验证零回归)。注意:纯常量折叠类优化(`1+2`、`"a"*3`)CPython 编译器自己也会做,opast 的运行时收益主要来自 CPython 不做的部分——内联、需类型证明的代数化简、去动态化。
+内置负载:`inline`(小函数热循环)、`inlinestmt`(多语句函数体的语句级内联)、`algebra`(可证明 int 的恒等式噪声)、`strength`(for-range 计数器上的强度削减与 `abs` 消除)、`dedynamize`(热循环里的常量 `eval`/`getattr`)、`licm`(热循环里的不变量表达式)、`lencache`(热循环里新鲜列表的 `len()`)、`rangeiter`(新鲜列表上的下标循环转直接迭代/enumerate)、`condnarrow`(热循环里可证死亡的守卫)、`looptocomp`(append 累加循环转推导式)、`loopfold`(常量边界纯 int 热核的优化期折叠与向外坍缩)、`comptomap`(内置函数上的推导式转 map/filter)、`localize`(热循环里的内置名/模块全局名局部化)、`mixed`(内联→折叠级联+死代码)、`daily`(日常风格的订单结算日报,单个脚本同时覆盖全部 pass 的实用测试点)、`jitlazy`(变量边界数值核,验证运行期 lazy 触发)、`annotated`(带类型注解的数值核)、`fastmath`(浮点核)、`tailrec`(累加器尾递归)、`attrhoist`(循环不变属性链)——这五个在普通模式按设计 ~1x,真实数字看激进列;`control`(默认层无可优化项:普通列预期 ~1.00x、0 改写,验证零回归;激进层的模块循环外提允许命中它)。注意:纯常量折叠类优化(`1+2`、`"a"*3`)CPython 编译器自己也会做,opast 的运行时收益主要来自 CPython 不做的部分——内联、需类型证明的代数化简、去动态化。
 
 Python API:
 
@@ -167,6 +168,16 @@ run_source("print(1 + 1)")                # 直接从源码字符串优化并运
 optimize_file("script.py", disable="inline,licm")
 run_source("x = 1 + 2", disable=("constant-folding", "const-prop"))
 ```
+
+批量构建模式(PyInstaller 等打包前预处理):
+
+```powershell
+python -m opast.build src/ -o build_opt/ --entry main.py   # 整树优化,非 .py 文件原样复制
+pyinstaller build_opt/main.py                              # 对优化后的树打包
+python -m opast.build src/ -o build_opt/ -O3 --disable jit # 激进层但保持零运行时依赖
+```
+
+递归优化目录下所有 `.py` 到镜像输出树(`__pycache__`/VCS 目录自动跳过,`--exclude` 可加);优化不了的文件(语法错误等)原样复制并警告——构建永不中断(`--strict` 则改为报错退出)。目录构建把每个文件当**库模块**:整个顶层都是公共 API,故 unused 消除与激进的 `module-locals` 选项一并强制关闭("模块内无人读取的名字"正是导入方要读的;import hook 现在也执行同一契约);入口脚本用 `--entry main.py` 标记以恢复完整脚本级清理。默认层产物是**零 opast 运行时依赖**的普通 Python 源码,适合冻结打包;`--jit` 产物运行期要 import `opast.jitsupport`——冻结时需连带打包 opast 和 numba。注释与排版不保留(行首 `#!` shebang 保留),行号会漂移。
 
 IPython / Jupyter(cell magic):
 

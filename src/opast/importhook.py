@@ -186,7 +186,9 @@ def install(
     # A library module's entire top level is its public surface: functions
     # and imports that are unused *within* the module are exactly what
     # importers consume (``mod.calc()``, re-exports).  Unused-elimination is
-    # therefore forced off for imported modules (entry scripts keep it).
+    # therefore forced off for imported modules (entry scripts keep it), and
+    # so is the aggressive ``module-locals`` option -- "module-level names
+    # nothing in the module reads" are exactly what importers read.
     disabled = set(_normalize_disable(disable)) | {"unused"}
     options = _HookOptions(
         max_iterations=max_iterations,
@@ -194,7 +196,9 @@ def install(
         disable=tuple(sorted(disabled)),
         report=report,
         no_cache=bool(os.environ.get("OPAST_NO_IMPORT_CACHE")),
-        aggressive=tuple(sorted(normalize_aggressive(aggressive))),
+        aggressive=tuple(
+            sorted(normalize_aggressive(aggressive) - {"module-locals"})
+        ),
     )
     finder = OpastFinder(roots, options)
     sys.meta_path.insert(0, finder)
