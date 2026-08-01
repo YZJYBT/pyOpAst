@@ -191,10 +191,11 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         aggressive = normalize_aggressive(ns.aggressive)
-        _normalize_disable(ns.disable)  # validate pass names upfront
+        disabled = _normalize_disable(ns.disable)  # also validates upfront
     except ValueError as exc:
         parser.error(str(exc))
-    ns.jit = ns.jit or "jit" in aggressive
+    # ``--disable jit`` wins: no numba warning for a pass that will not run.
+    ns.jit = (ns.jit or "jit" in aggressive) and "jit" not in disabled
 
     if ns.jit:
         from . import jitsupport

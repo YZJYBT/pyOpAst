@@ -12,6 +12,7 @@ from .pipeline import (
     AGGRESSIVE_NAMES,
     DEFAULT_MAX_ITERATIONS,
     PASS_NAMES,
+    _normalize_disable,
     normalize_aggressive,
     optimize_file,
     optimize_source,
@@ -93,11 +94,15 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         aggressive = normalize_aggressive(ns.aggressive)
+        disabled = _normalize_disable(ns.disable)
     except ValueError as exc:
         parser.error(str(exc))
     # The umbrella flag also turns on the two options that live outside the
     # pass pipeline; the dedicated flags keep working on their own.
-    ns.jit = ns.jit or "jit" in aggressive
+    # ``--disable jit`` wins over both -- otherwise the CLI would warn
+    # about numba (and materialize source for it) for a pass that the
+    # pipeline is not going to run.
+    ns.jit = (ns.jit or "jit" in aggressive) and "jit" not in disabled
     ns.opt_imports = ns.opt_imports or "opt-imports" in aggressive
     # The import hook is a run-time affair; its assumption only applies when
     # the hook is actually installed (the pipeline reports the rest).

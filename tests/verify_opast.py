@@ -2761,6 +2761,61 @@ def verify_cli() -> Area:
             area.fail("--report did not include pass stats on stderr", command_text([PYTHON, "-m", "opast", "--no-run", "--report", str(p)]))
         if not out.exists() or "print" not in out.read_text(encoding="utf-8"):
             area.fail("-o did not write optimized source", command_text([PYTHON, "-m", "opast", "--no-run", "-o", str(out), str(p)]))
+
+    hot = write_case(
+        "cli_disable_jit_o3",
+        """
+        def hot(n):
+            total = 0
+            for i in range(n):
+                total += i
+            return total
+        print(hot(12000))
+        """,
+    )
+    no_numba = run([PYTHON, "-S", "-m", "opast", "-O3", "--disable", "jit", str(hot)])
+    if no_numba.returncode != 0 or "numba is not available" in no_numba.stderr:
+        area.fail(
+            "-O3 --disable jit warned or failed when numba was unavailable",
+            command_text([PYTHON, "-S", "-m", "opast", "-O3", "--disable", "jit", str(hot)]),
+        )
+
+    source_probe = (
+        "import opast.__main__ as m\n"
+        "def fake_execute(result, args=(), write_source=False, argv0=None):\n"
+        "    print('write_source', write_source)\n"
+        "m.execute = fake_execute\n"
+        "raise SystemExit(m.main(['-O3', '--disable', 'jit', '-c', 'print(1)']))\n"
+    )
+    src_cp = run([PYTHON, "-c", source_probe])
+    if src_cp.returncode != 0 or "write_source False" not in src_cp.stdout:
+        area.fail(
+            "-O3 --disable jit still materialized source for numba execution",
+            command_text([PYTHON, "-c", source_probe]),
+        )
+
+    hook_probe = (
+        "import opast.__main__ as m\n"
+        "import opast.importhook as ih\n"
+        "class Finder: pass\n"
+        "def fake_install(roots, **kwargs):\n"
+        "    print('hook_jit', kwargs.get('jit'))\n"
+        "    return Finder()\n"
+        "def fake_uninstall(finder):\n"
+        "    pass\n"
+        "def fake_execute(result, args=(), write_source=False, argv0=None):\n"
+        "    print('run')\n"
+        "ih.install = fake_install\n"
+        "ih.uninstall = fake_uninstall\n"
+        "m.execute = fake_execute\n"
+        "raise SystemExit(m.main(['-O3', '--disable', 'jit', '--opt-imports', '-c', 'print(1)']))\n"
+    )
+    hook_cp = run([PYTHON, "-c", hook_probe])
+    if hook_cp.returncode != 0 or "hook_jit False" not in hook_cp.stdout:
+        area.fail(
+            "-O3 --disable jit still passed jit=True to the import hook",
+            command_text([PYTHON, "-c", hook_probe]),
+        )
     return area
 
 
