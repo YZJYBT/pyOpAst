@@ -112,6 +112,18 @@ def _simple_class(cd: ast.ClassDef, budget: int) -> _ClassInfo | None:
     if cd.decorator_list or cd.bases or cd.keywords:
         return None
     body = _docstring_stripped(cd.body)
+    # Tolerate the ``__slots__ = (...)`` line the slotify pass injects
+    # (or an equivalent user one): it does not change the shape contract.
+    body = [
+        stmt
+        for stmt in body
+        if not (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == "__slots__"
+        )
+    ]
     if len(body) != 1 or not isinstance(body[0], ast.FunctionDef):
         return None
     init = body[0]

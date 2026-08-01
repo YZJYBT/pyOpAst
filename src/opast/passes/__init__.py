@@ -18,6 +18,7 @@ from .outline import ModuleLoopOutlining
 from .propagate import ConstantPropagation
 from .rangeiter import RangeToIteration
 from .scalarrepl import ScalarReplacement
+from .slotify import SlotsInjection
 from .tailcall import TailRecursion
 from .unused import UnusedElimination
 
@@ -36,6 +37,7 @@ __all__ = [
     "UnusedElimination",
     "FunctionInlining",
     "ScalarReplacement",
+    "SlotsInjection",
     "TailRecursion",
     "RangeToIteration",
     "LoopToComprehension",

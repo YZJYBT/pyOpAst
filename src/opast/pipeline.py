@@ -25,6 +25,7 @@ from .passes import (
     ModuleLoopOutlining,
     RangeToIteration,
     ScalarReplacement,
+    SlotsInjection,
     TailRecursion,
     UnusedElimination,
 )
@@ -65,6 +66,7 @@ PASS_CLASSES = (
     # a plain local aggregate this pass can then dissolve; the scalars it
     # leaves behind feed const-prop / CSE / unused next iteration.
     ScalarReplacement,
+
     LoopToComprehension,  # picks up range-to-iter output in the same pass
     ComprehensionToMap,
     # Late: every other pass gets to work on the loop while it is still a
@@ -75,8 +77,11 @@ PASS_CLASSES = (
 )
 
 #: Public names accepted by the ``disable`` parameter (plus ``"jit"`` for the
-#: one-shot jit pass).
-PASS_NAMES = tuple(cls.name for cls in PASS_CLASSES)
+#: one-shot jit pass).  ``slotify`` is a one-shot pass too: it runs once on
+#: the pristine module *before* the fixpoint loop, because its rejections
+#: rest on module-wide evidence (a ``setattr`` reference, a class alias)
+#: that later passes may legitimately erase.
+PASS_NAMES = tuple(cls.name for cls in PASS_CLASSES) + (SlotsInjection.name,)
 
 DEFAULT_MAX_ITERATIONS = 8
 
@@ -92,6 +97,7 @@ AGGRESSIVE_NAMES = (
     "loop-state",
     "module-locals",
     "opt-imports",
+    "slots",
     "tail-calls",
     "unbounded-recursion",
 )
@@ -129,6 +135,11 @@ AGGRESSIVE_ASSUMPTIONS = {
         "temporaries, not part of the module's API (refines loop-state)"
     ),
     "opt-imports": "optimized imported modules are not monkeypatched",
+    "slots": (
+        "classes gain __slots__: instances never receive attributes beyond "
+        "those the class's own methods assign, and nothing relies on "
+        "instance __dict__ (vars(obj), protocol-0/1 pickle)"
+    ),
     "tail-calls": (
         "RecursionError from eliminated tail recursion is approximated by a "
         "depth counter: it fires at a somewhat different depth and follows "
@@ -342,6 +353,7 @@ def optimize_ast(
     disabled = _normalize_disable(disable)
     aggressive = normalize_aggressive(aggressive)
     jit = (jit or "jit" in aggressive) and "jit" not in disabled
+    slots = "slots" in aggressive and SlotsInjection.name not in disabled
     active = [cls for cls in PASS_CLASSES if cls.name not in disabled]
     # An assumption is only worth reporting when something actually acts on
     # it: ``--disable`` can switch off the jit pass or an option's every
@@ -360,7 +372,20 @@ def optimize_ast(
     }
     if jit:
         in_play.add("jit")
+    if slots:
+        in_play.add("slots")
     report = OptimizationReport(aggressive=frozenset(in_play))
+    if slots:
+        # One-shot, before the fixpoint: the pass's rejections rest on
+        # module-wide evidence (a setattr reference, a class alias, a
+        # visible extra attribute) that later passes may legitimately
+        # erase -- deciding on the pristine module keeps a rejection a
+        # rejection.  Downstream passes tolerate the injected line.
+        slots_pass = SlotsInjection()
+        slots_pass.aggressive = frozenset({"slots"})
+        tree = slots_pass.run(tree)
+        report.record(slots_pass)
+        ast.fix_missing_locations(tree)
     for iteration in range(max_iterations):
         iteration_changes = 0
         for pass_class in active:

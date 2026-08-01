@@ -2384,6 +2384,115 @@ def verify_scalar_replacement() -> Area:
     return area
 
 
+def verify_slotify() -> Area:
+    area = Area("slotify")
+
+    basic = write_case(
+        "slotify_basic",
+        """
+        import weakref
+        class Point:
+            "point docs"
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+            def move(self, dx):
+                self.x += dx
+        p = Point(2, 3)
+        p.move(5)
+        print(p.x, p.y, weakref.ref(p)() is p)
+        """,
+    )
+    assert_same_output(area, basic)
+    default = show(basic)
+    if default.returncode != 0 or "__slots__" in default.stdout:
+        area.fail("slotify ran without aggressive slots", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(basic)]))
+    slotted = show(basic, "--aggressive", "slots")
+    if (
+        slotted.returncode != 0
+        or "__slots__ = ('x', 'y', '__weakref__')" not in slotted.stdout
+        or "weakref.ref" not in slotted.stdout
+    ):
+        area.fail("slotify did not inject expected slots plus __weakref__", command_text([PYTHON, "-m", "opast", "--show", "--no-run", "--aggressive", "slots", str(basic)]))
+
+    scalar_combo = write_case(
+        "slotify_scalarrepl_combo",
+        """
+        class Point:
+            def __init__(self, x, y):
+                self.x = x
+                self.y = y
+        def f(v):
+            p = Point(v, v + 1)
+            return p.x + p.y
+        print(f(4))
+        """,
+    )
+    assert_same_output(area, scalar_combo)
+    combo = show(scalar_combo, "--aggressive", "slots")
+    if combo.returncode != 0 or "p = Point" in combo.stdout or "p.x" in combo.stdout or "__slots__" not in combo.stdout:
+        area.fail("slotified simple class did not remain scalar-repl eligible", command_text([PYTHON, "-m", "opast", "--show", "--no-run", "--aggressive", "slots", str(scalar_combo)]))
+
+    rejected = {
+        "slotify_existing_slots": """
+            class C:
+                __slots__ = ("x",)
+                def __init__(self):
+                    self.x = 1
+            print(C().x)
+        """,
+        "slotify_setattr_module": """
+            class C:
+                def __init__(self):
+                    self.x = 1
+            def f(obj):
+                setattr(obj, "y", 2)
+            print(C().x)
+        """,
+        "slotify_extra_instance_attr": """
+            class C:
+                def __init__(self):
+                    self.x = 1
+            c = C()
+            c.y = 2
+            print(c.x, c.y)
+        """,
+        "slotify_class_slot_store": """
+            class C:
+                def __init__(self):
+                    self.x = 1
+            C.x = 5
+            try:
+                print(C().x)
+            except Exception as exc:
+                print(type(exc).__name__)
+        """,
+        "slotify_alias_class_slot_store": """
+            class C:
+                def __init__(self):
+                    self.x = 1
+            D = C
+            D.x = 5
+            try:
+                print(C().x)
+            except Exception as exc:
+                print(type(exc).__name__)
+        """,
+    }
+    for name, src in rejected.items():
+        path = write_case(name, src)
+        assert_same_output(area, path)
+        s = show(path, "--aggressive", "slots")
+        if s.returncode != 0:
+            area.fail(f"{name}: --show failed", command_text([PYTHON, "-m", "opast", "--show", "--no-run", "--aggressive", "slots", str(path)]))
+        elif name != "slotify_existing_slots" and "__slots__" in s.stdout:
+            area.fail(f"{name}: rejected class was slotified", command_text([PYTHON, "-m", "opast", "--show", "--no-run", "--aggressive", "slots", str(path)]))
+        elif name == "slotify_existing_slots" and s.stdout.count("__slots__") != 1:
+            area.fail("existing __slots__ class was slotified again", command_text([PYTHON, "-m", "opast", "--show", "--no-run", "--aggressive", "slots", str(path)]))
+
+    return area
+
+
 def verify_constant_containers() -> Area:
     area = Area("constant containers")
 
@@ -2679,6 +2788,7 @@ def main() -> int:
         verify_strength_interval_regressions(),
         verify_cross_scope_constprop(),
         verify_scalar_replacement(),
+        verify_slotify(),
         verify_constant_containers(),
         verify_batch_build(),
         verify_dynamic_fallback(),

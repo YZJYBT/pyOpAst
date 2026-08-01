@@ -79,6 +79,7 @@ opast --aggressive --disable jit script.py    # 全开但排除某项
 | `loop-state` | **模块层热循环外提**(见下),以及模块层的 `loop-to-comp` | 模块层循环中途抛异常时,模块全局可能保持循环前的值而非部分结果 |
 | `module-locals` | 修饰 `loop-state`:循环计数器与临时量无需写回,未知迭代数的循环由此可外提 | 模块里无人读取的模块级名字是私有临时量,不是 API |
 | `opt-imports` | 上文的导入钩子 | 被优化的导入模块不会被 monkeypatch |
+| `slots` | **`__slots__` 注入**:模块级无基类的类自动加 `__slots__`,每个实例省掉一个 `__dict__`(4 属性时实测内存小 **1.2 倍**,属性越少省得越多;属性访问速度在 3.14 上 ~1.0x——自适应解释器的内联缓存已把 dict 访问做得够快,收益主要是内存,旧解释器上另有速度收益)。恒附 `'__weakref__'` 保住 `weakref.ref`。假设之下仍须证明的部分:无装饰器/基类/元类/自带 `__slots__`/`__setattr__` 族、方法不带未知装饰器(`functools.cached_property` 运行期经实例 `__dict__` 存储,静态不可见)、实例属性不与类变量撞名、全模块无 `setattr`/`delattr`、模块内可见的额外属性赋值(`p.tag = 1`)直接取消该类资格;类**对象**本身只许出现在 `C(...)` 调用位、门控的 `isinstance`/`issubclass` 实参、单基类位置——`C.x = 5`(直接或经别名)会覆写注入的槽描述符,类属性读取也可观察,均拒绝。本 pass 在不动点循环**之前**对原始模块一次性运行:拒绝依据的是全模块证据(`setattr` 引用、别名),后续 pass 合法删除证据不得把"拒绝"翻成"注入" | 实例不会获得类自身方法赋值之外的属性,且没有代码依赖实例 `__dict__`(`vars(obj)`、协议 0/1 的 pickle) |
 | `tail-calls` | **尾递归消除**(带计数器,2.6 倍) | `RecursionError` 由深度计数器近似:触发深度略有偏移,且依据 `sys.getrecursionlimit()` 而非解释器自身的栈 |
 | `unbounded-recursion` | 修饰 `tail-calls`:去掉计数器(4.6 倍,且深层尾递归直接跑通) | 尾递归可能越过递归上限继续运行,而不再抛 `RecursionError` |
 
