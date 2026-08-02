@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.1 (2026-08-02)
+
+**修复:** `-O3 --disable jit`(及 `--jit --disable jit`)时 CLI 仍打印"numba 不可用"警告、仍为 numba 物化临时源码副本、import hook 仍收到 jit 开启——pipeline 本身早已正确禁用该 pass,只是 CLI 侧三个消费者拿的是未经 `--disable` 门控的旧标志。主 CLI 与 `opast.build` 一并修正;未知 `--disable` 名现在在参数解析期干净报错。
+
+**文档:** 双语 README 新增"实测结果"总览(普通层 geomean 2.34x、激进 `-O3` 15.6x,21 负载 best-of-5)与基准测试节的完整两模式表格 + 诚实解读指南(loopfold/dedynamize 属构造极端、中间行才是代表性数字、激进三位数是 numba 本职、噪声说明与复现命令)。
+
 ## 0.3.0 (2026-08-01)
 
 **新增默认层 pass:**
