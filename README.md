@@ -21,6 +21,17 @@ opast -c "print(sum(i for i in range(10)))"   # inline code string, like python 
 opast --disable inline,licm script.py         # skip passes by name
 ```
 
+## Measured results
+
+CPython 3.14.2 (Windows), 21 built-in workloads, best of 5 runs per variant, outputs verified identical — see [Benchmarks](#benchmarks) for the full table and how to reproduce:
+
+| Mode | Geomean speedup |
+| --- | --- |
+| Default tier — proof-backed passes only, plain CPython output | **2.34x** |
+| Aggressive `-O3` — every assumption-backed option, numba jit included | **15.6x** |
+
+A few individual rows: constant `eval`/`getattr` de-dynamization **48x**, inline→fold cascades **2.4x** (41x under `-O3`), loop-invariant motion **1.8x**, a "daily-style" report script **1.6x** — and numeric kernels that numba can take whole reach **50–140x** under `-O3`. The `control` workload (nothing optimizable) stays at **0.99x** with 0 rewrites: what opast cannot prove, it does not touch.
+
 ## Design
 
 Three principles drive every pass:
@@ -175,6 +186,43 @@ python -m opast.bench --list
 ```
 
 21 built-in workloads, each measured in **two modes** — default (proof-backed passes only) and aggressive (`-O3`: every assumption-backed option, jit included; numba recommended, the warmup run absorbs import + compile cost) — in the same interpreter with GC disabled and a `RESULT` equality check per variant. One combined table with both speedups and per-mode geomeans; several workloads (`annotated`, `fastmath`, `tailrec`, `jitlazy`) are ~1.0x in the default tier by design and show their real numbers in the aggressive column. Note that CPython's own compiler already does trivial constant folding — opast's wins come from what CPython does *not* do: inlining, type-proven algebraic rewrites, loop rewrites, de-dynamization.
+
+Full run on CPython 3.14.2 (Windows, best of 5, `python -m opast.bench -r 5`):
+
+```text
+workload       original    default  speedup  aggressive  speedup  changes  result
+---------------------------------------------------------------------------------
+algebra         192.6ms     92.3ms    2.09x       9.3ms   48.47x      8/9  OK
+annotated       129.8ms    118.5ms    1.09x       1.0ms  134.64x     8/21  OK
+attrhoist        45.5ms     35.7ms    1.27x      34.5ms    1.54x     9/18  OK
+comptomap       443.6ms    192.8ms    2.30x     199.6ms    2.56x     11/8  OK
+condnarrow       90.6ms     56.1ms    1.61x       1.0ms   81.08x      7/8  OK
+control         131.6ms    133.1ms    0.99x      91.2ms    1.38x      0/2  OK
+daily           231.2ms    145.5ms    1.59x     146.2ms    1.46x    47/48  OK
+dedynamize     1067.9ms     22.3ms   47.99x      12.5ms   87.16x      2/5  OK
+fastmath         86.2ms     82.3ms    1.05x       0.7ms  142.05x      0/5  OK
+inline          712.8ms    527.6ms    1.35x      17.9ms   41.20x    10/13  OK
+inlinestmt      176.1ms    147.7ms    1.19x       4.3ms   40.17x      3/4  OK
+jitlazy         278.7ms    271.4ms    1.03x       4.8ms   59.03x      1/2  OK
+lencache         75.3ms     53.8ms    1.40x      59.4ms    1.26x      2/2  OK
+licm            120.3ms     67.3ms    1.79x      61.1ms    1.95x      6/7  OK
+localize        221.9ms    210.5ms    1.05x     220.0ms    1.05x      4/2  OK
+loopfold        268.5ms      0.1ms 5153.70x       0.1ms 5088.05x    21/21  OK
+looptocomp       62.5ms     59.2ms    1.06x      55.8ms    1.14x      4/4  OK
+mixed           252.8ms    103.6ms    2.44x       6.4ms   41.35x    19/21  OK
+rangeiter        83.4ms     81.3ms    1.03x      72.6ms    1.11x      2/2  OK
+strength        479.2ms    401.1ms    1.19x      15.6ms   30.28x      7/8  OK
+tailrec         241.1ms    252.0ms    0.96x       2.2ms  115.16x      1/4  OK
+---------------------------------------------------------------------------------
+geomean: default 2.34x | aggressive 15.64x
+```
+
+Reading the table honestly:
+
+- **`loopfold` (~5000x) is a constructed extreme**, not a typical win: the whole computation happens *at optimization time* (closed-form loop evaluation) and the run-time script is just constant assignments. The real accounting is "pay ~0.13s once at optimize time, save ~0.27s every run". `dedynamize` (48x) is similar — a hot loop calling constant `eval`/`getattr` collapses to static code.
+- **Middle rows are the representative ones**: `mixed` 2.44x, `comptomap` 2.30x, `algebra` 2.09x, `licm` 1.79x, `condnarrow` 1.61x, `daily` (a realistic order-settlement report script touching many passes at once) 1.59x.
+- **Aggressive triple-digit rows are numba doing what numba does** — the interesting part is that opast's rewrites make the functions *jittable* (de-dynamized, inlined, typed) without you restructuring anything, and any numba failure falls back to plain Python at runtime.
+- Sub-100ms rows carry a few percent of run-to-run noise (`control` has bounced between 0.92x and 1.09x across runs); treat ±0.05x as measurement jitter. Numbers are from one machine — run the command above on yours.
 
 ## Batch build (PyInstaller & co)
 

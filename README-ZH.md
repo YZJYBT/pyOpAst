@@ -6,6 +6,17 @@
 
 基于 Python `ast` 的源码优化器。对脚本做静态优化后,用**运行 opast 的解释器**(默认 CPython)直接执行优化后的代码。
 
+## 实测结果
+
+CPython 3.14.2(Windows),21 个内置负载,每变体 best-of-5,各变体输出逐一校验一致——完整表格与复现方法见下文"基准测试"节:
+
+| 模式 | geomean 加速 |
+| --- | --- |
+| 普通(仅证明背书的默认层,产物是纯 CPython 源码) | **2.34x** |
+| 激进 `-O3`(全部假设背书选项,含 numba jit) | **15.6x** |
+
+个别行:常量 `eval`/`getattr` 去动态化 **48x**、内联→折叠级联 **2.4x**(`-O3` 下 41x)、循环不变量外提 **1.8x**、日常风格结算报表脚本 **1.6x**;numba 能整体接管的数值核在 `-O3` 下达 **50–140x**。`control` 负载(无可优化项)保持 **0.99x**、0 改写——证明不了的,一律不碰。
+
 ## 优化策略(第一批)
 
 | Pass | 说明 |
@@ -152,6 +163,43 @@ python -m opast.bench my_hot_script.py         # 也可测任意脚本(可选定
 ```
 
 内置负载:`inline`(小函数热循环)、`inlinestmt`(多语句函数体的语句级内联)、`algebra`(可证明 int 的恒等式噪声)、`strength`(for-range 计数器上的强度削减与 `abs` 消除)、`dedynamize`(热循环里的常量 `eval`/`getattr`)、`licm`(热循环里的不变量表达式)、`lencache`(热循环里新鲜列表的 `len()`)、`rangeiter`(新鲜列表上的下标循环转直接迭代/enumerate)、`condnarrow`(热循环里可证死亡的守卫)、`looptocomp`(append 累加循环转推导式)、`loopfold`(常量边界纯 int 热核的优化期折叠与向外坍缩)、`comptomap`(内置函数上的推导式转 map/filter)、`localize`(热循环里的内置名/模块全局名局部化)、`mixed`(内联→折叠级联+死代码)、`daily`(日常风格的订单结算日报,单个脚本同时覆盖全部 pass 的实用测试点)、`jitlazy`(变量边界数值核,验证运行期 lazy 触发)、`annotated`(带类型注解的数值核)、`fastmath`(浮点核)、`tailrec`(累加器尾递归)、`attrhoist`(循环不变属性链)——这五个在普通模式按设计 ~1x,真实数字看激进列;`control`(默认层无可优化项:普通列预期 ~1.00x、0 改写,验证零回归;激进层的模块循环外提允许命中它)。注意:纯常量折叠类优化(`1+2`、`"a"*3`)CPython 编译器自己也会做,opast 的运行时收益主要来自 CPython 不做的部分——内联、需类型证明的代数化简、去动态化。
+
+完整一轮实测(CPython 3.14.2,Windows,best-of-5,`python -m opast.bench -r 5`):
+
+```text
+workload       original    default  speedup  aggressive  speedup  changes  result
+---------------------------------------------------------------------------------
+algebra         192.6ms     92.3ms    2.09x       9.3ms   48.47x      8/9  OK
+annotated       129.8ms    118.5ms    1.09x       1.0ms  134.64x     8/21  OK
+attrhoist        45.5ms     35.7ms    1.27x      34.5ms    1.54x     9/18  OK
+comptomap       443.6ms    192.8ms    2.30x     199.6ms    2.56x     11/8  OK
+condnarrow       90.6ms     56.1ms    1.61x       1.0ms   81.08x      7/8  OK
+control         131.6ms    133.1ms    0.99x      91.2ms    1.38x      0/2  OK
+daily           231.2ms    145.5ms    1.59x     146.2ms    1.46x    47/48  OK
+dedynamize     1067.9ms     22.3ms   47.99x      12.5ms   87.16x      2/5  OK
+fastmath         86.2ms     82.3ms    1.05x       0.7ms  142.05x      0/5  OK
+inline          712.8ms    527.6ms    1.35x      17.9ms   41.20x    10/13  OK
+inlinestmt      176.1ms    147.7ms    1.19x       4.3ms   40.17x      3/4  OK
+jitlazy         278.7ms    271.4ms    1.03x       4.8ms   59.03x      1/2  OK
+lencache         75.3ms     53.8ms    1.40x      59.4ms    1.26x      2/2  OK
+licm            120.3ms     67.3ms    1.79x      61.1ms    1.95x      6/7  OK
+localize        221.9ms    210.5ms    1.05x     220.0ms    1.05x      4/2  OK
+loopfold        268.5ms      0.1ms 5153.70x       0.1ms 5088.05x    21/21  OK
+looptocomp       62.5ms     59.2ms    1.06x      55.8ms    1.14x      4/4  OK
+mixed           252.8ms    103.6ms    2.44x       6.4ms   41.35x    19/21  OK
+rangeiter        83.4ms     81.3ms    1.03x      72.6ms    1.11x      2/2  OK
+strength        479.2ms    401.1ms    1.19x      15.6ms   30.28x      7/8  OK
+tailrec         241.1ms    252.0ms    0.96x       2.2ms  115.16x      1/4  OK
+---------------------------------------------------------------------------------
+geomean: default 2.34x | aggressive 15.64x
+```
+
+诚实地读这张表:
+
+- **`loopfold`(~5000x)是构造出的极端案例**,不是典型收益:整个计算发生在**优化期**(常量循环闭式折叠),运行期脚本只剩常量赋值。真实的账是"优化期一次性付 ~0.13s,之后每次运行省 ~0.27s"。`dedynamize`(48x)同理——热循环里的常量 `eval`/`getattr` 坍缩为静态代码。
+- **中间行才是代表性数字**:`mixed` 2.44x、`comptomap` 2.30x、`algebra` 2.09x、`licm` 1.79x、`condnarrow` 1.61x、`daily`(一次触及多数 pass 的真实风格订单结算报表)1.59x。
+- **激进列的三位数是 numba 的本职**——有意思的地方在于 opast 的改写(去动态化、内联、类型化)让函数**变得可 jit**,你不用重构任何代码;numba 任何失败运行期自动回退纯 Python。
+- 100ms 以下的行有百分之几的轮间噪声(`control` 历次在 0.92x–1.09x 间浮动),±0.05x 当测量抖动看待。数字来自单台机器——用上面的命令在你自己的机器上复现。
 
 Python API:
 
