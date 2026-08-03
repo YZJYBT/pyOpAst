@@ -29,25 +29,46 @@ from __future__ import annotations
 
 import ast
 
+from ..analysis import bound_names
 from ..safety import iter_region, tree_has_dynamic
 from .base import ScopedTransformer
 
 
-def _is_pure(node: ast.AST) -> bool:
-    """Evaluation can neither raise nor cause side effects."""
+def _is_pure(node: ast.AST, pure: frozenset = frozenset()) -> bool:
+    """Evaluation can neither raise nor cause side effects.
+
+    *pure* (aggressive ``pure-calls``) additionally admits calls to
+    trusted-pure module functions with name/constant/pure arguments;
+    dropping such a call is exactly what the option's assumption signs off
+    on (its exception or non-termination vanishes with it).
+    """
     if isinstance(node, ast.Constant):
         return True
     if isinstance(node, (ast.Tuple, ast.List)):
-        return all(_is_pure(e) for e in node.elts)
+        return all(_is_pure(e, pure) for e in node.elts)
     if isinstance(node, ast.Set):
         # elements must be hashable, so require constants
         return all(isinstance(e, ast.Constant) for e in node.elts)
     if isinstance(node, ast.Dict):
         return all(
             k is not None and isinstance(k, ast.Constant) for k in node.keys
-        ) and all(_is_pure(v) for v in node.values)
+        ) and all(_is_pure(v, pure) for v in node.values)
     if isinstance(node, ast.Lambda):
         return _pure_arguments(node.args)
+    if (
+        pure
+        and isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in pure
+    ):
+        def _arg(a: ast.AST) -> bool:
+            if isinstance(a, ast.Name):
+                return isinstance(a.ctx, ast.Load)
+            return _is_pure(a, pure)
+
+        return all(_arg(a) for a in node.args) and all(
+            k.arg is not None and _arg(k.value) for k in node.keywords
+        )
     return False
 
 
@@ -88,10 +109,11 @@ class UnusedElimination(ScopedTransformer):
 
     def __init__(self) -> None:
         super().__init__()
-        # (kind, used-names) per enclosing scope; used is None when
-        # elimination is disabled for that scope (class bodies, lambdas,
-        # unknown __all__).
-        self._stack: list[tuple[str, set[str] | None]] = []
+        # (kind, used-names, trusted-pure-callees) per enclosing scope; used
+        # is None when elimination is disabled for that scope (class bodies,
+        # lambdas, unknown __all__).  The pure set is pre-shadowed for the
+        # scope: a local binding of a trusted name evicts it.
+        self._stack: list[tuple[str, set[str] | None, frozenset]] = []
 
     def run(self, tree: ast.Module) -> ast.Module:
         if tree_has_dynamic(tree):
@@ -99,12 +121,12 @@ class UnusedElimination(ScopedTransformer):
             return tree
         return self.visit(tree)
 
-    def _current(self) -> tuple[str, set[str] | None]:
-        return self._stack[-1] if self._stack else ("opaque", None)
+    def _current(self) -> tuple[str, set[str] | None, frozenset]:
+        return self._stack[-1] if self._stack else ("opaque", None, frozenset())
 
     # -- scopes -----------------------------------------------------------
     def visit_Module(self, node: ast.Module) -> ast.AST:
-        self._stack.append(("module", self._module_used(node)))
+        self._stack.append(("module", self._module_used(node), frozenset()))
         try:
             return self.generic_visit(node)
         finally:
@@ -126,7 +148,7 @@ class UnusedElimination(ScopedTransformer):
         return used
 
     def _visit_function(self, node: ast.AST) -> ast.AST:
-        kind, used = self._current()
+        kind, used, _ = self._current()
         if (
             used is not None
             and node.name not in used
@@ -143,7 +165,12 @@ class UnusedElimination(ScopedTransformer):
         for stmt in iter_region(node):
             if isinstance(stmt, (ast.Global, ast.Nonlocal)):
                 used.update(stmt.names)
-        self._stack.append(("function", used))
+        # Trusted-pure callees must resolve to the module global: any local
+        # binding of the name in this scope shadows it.
+        scope_pure = (
+            self.pure_calls - bound_names(node) if self.pure_calls else frozenset()
+        )
+        self._stack.append(("function", used, scope_pure))
         try:
             return self.generic_visit(node)
         finally:
@@ -153,7 +180,7 @@ class UnusedElimination(ScopedTransformer):
     visit_AsyncFunctionDef = _visit_function
 
     def _visit_opaque(self, node: ast.AST) -> ast.AST:
-        self._stack.append(("opaque", None))
+        self._stack.append(("opaque", None, frozenset()))
         try:
             return self.generic_visit(node)
         finally:
@@ -168,7 +195,7 @@ class UnusedElimination(ScopedTransformer):
         return alias.asname or alias.name.split(".")[0]
 
     def _trim_imports(self, node, bound_name) -> ast.AST:
-        kind, used = self._current()
+        kind, used, _ = self._current()
         if used is None:
             return node
         keep = [a for a in node.names if bound_name(a) in used]
@@ -191,7 +218,7 @@ class UnusedElimination(ScopedTransformer):
     # -- local assignments -------------------------------------------------
     def visit_Assign(self, node: ast.Assign) -> ast.AST:
         node = self.generic_visit(node)
-        kind, used = self._current()
+        kind, used, pure = self._current()
         if kind != "function" or used is None:
             return node
         if not all(isinstance(t, ast.Name) for t in node.targets):
@@ -203,19 +230,19 @@ class UnusedElimination(ScopedTransformer):
         if live:
             node.targets = live
             return node
-        if _is_pure(node.value):
+        if _is_pure(node.value, pure):
             return ast.copy_location(ast.Pass(), node)
         return ast.copy_location(ast.Expr(value=node.value), node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> ast.AST:
         node = self.generic_visit(node)
-        kind, used = self._current()
+        kind, used, pure = self._current()
         if kind != "function" or used is None:
             return node
         if not isinstance(node.target, ast.Name) or node.target.id in used:
             return node
         # Local annotations are never evaluated or stored at runtime.
         self.changes += 1
-        if node.value is None or _is_pure(node.value):
+        if node.value is None or _is_pure(node.value, pure):
             return ast.copy_location(ast.Pass(), node)
         return ast.copy_location(ast.Expr(value=node.value), node)

@@ -21,6 +21,15 @@ Additional requirements per expression:
 * it contains at least one name and at least one operation or ``len`` call
   (repeated plain names/constants are free anyway).
 
+Under the aggressive ``pure-calls`` option, calls to trusted-pure module
+functions (see :func:`opast.purity.trusted_pure_functions`; never shadowed
+in the enclosing scope) also qualify when every argument is a constant, a
+plain name, a hoistable numeric expression, or another such call --
+argument names still pass the same boundness and no-rebind-in-span checks.
+The option's stated assumption covers the semantic deltas: a later
+occurrence inside a branch may now be evaluated up front, and the merged
+occurrences share one result object.
+
 Occurrences are matched *maximally* (a recorded expression's subexpressions
 are not counted separately) and a candidate that is a subexpression of
 another selected candidate is deferred to a later pipeline iteration.
@@ -35,6 +44,7 @@ import copy
 
 from ..analysis import (
     AnnotationTrust,
+    bound_names,
     builtin_gate,
     contains_name,
     fresh_container_names,
@@ -67,10 +77,11 @@ def _worthy(node: ast.AST, containers) -> bool:
 class _Collector(ast.NodeVisitor):
     """Records maximal eligible expressions per statement index."""
 
-    def __init__(self, ints, floats, containers) -> None:
+    def __init__(self, ints, floats, containers, pure=frozenset()) -> None:
         self.ints = ints
         self.floats = floats
         self.containers = containers
+        self.pure = pure
         self.table: dict[str, list[tuple[int, ast.AST]]] = {}
         self._idx = 0
 
@@ -86,10 +97,34 @@ class _Collector(ast.NodeVisitor):
     visit_Lambda = _skip
     visit_ClassDef = _skip
 
-    def _record(self, node: ast.AST) -> None:
-        if hoistable_num_expr(node, self.ints, self.floats, self.containers) and _worthy(
-            node, self.containers
+    def _pure_call(self, node: ast.AST) -> bool:
+        """Aggressive ``pure-calls`` eligibility.  Argument names are
+        accepted here; the selection loop still checks their boundness and
+        rebinding over the occurrence span."""
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in self.pure
         ):
+            return False
+        return all(self._arg_ok(a) for a in node.args) and all(
+            k.arg is not None and self._arg_ok(k.value) for k in node.keywords
+        )
+
+    def _arg_ok(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant):
+            return True
+        if isinstance(node, ast.Name):
+            return isinstance(node.ctx, ast.Load)
+        if isinstance(node, ast.Call):
+            return self._pure_call(node)
+        return hoistable_num_expr(node, self.ints, self.floats, self.containers)
+
+    def _record(self, node: ast.AST) -> None:
+        if (
+            hoistable_num_expr(node, self.ints, self.floats, self.containers)
+            and _worthy(node, self.containers)
+        ) or self._pure_call(node):
             self.table.setdefault(ast.dump(node), []).append((self._idx, node))
             # keep descending: a shared subexpression may repeat inside
             # otherwise-distinct larger expressions
@@ -180,7 +215,12 @@ class CommonSubexpressionElimination(ScopedTransformer):
             trusted=self._trust.floats(node),
             typed_calls=self._trust.float_returns,
         )
-        if ints or floats or containers:
+        # Trusted-pure callees must resolve to the module global: any local
+        # binding of the name in this scope shadows it.
+        self._scope_pure = (
+            self.pure_calls - bound_names(node) if self.pure_calls else frozenset()
+        )
+        if ints or floats or containers or self._scope_pure:
             # Parameters are bound on entry (same reason as in LICM).
             node.body = self._process_block(
                 node.body, set(param_names(node)), ints, floats, containers
@@ -239,7 +279,7 @@ class CommonSubexpressionElimination(ScopedTransformer):
         return stmts
 
     def _eliminate(self, stmts, bound: set[str], ints, floats, containers) -> list:
-        collector = _Collector(ints, floats, containers)
+        collector = _Collector(ints, floats, containers, pure=self._scope_pure)
         bound_at: list[set[str]] = []
         rebinds: list[set[str]] = []
         running = set(bound)
@@ -251,18 +291,24 @@ class CommonSubexpressionElimination(ScopedTransformer):
             running -= unbound_risk_names(stmt)
 
         selected: dict[str, tuple[int, str, ast.AST]] = {}
-        relevant = set(ints) | set(floats) | set(containers)
+        # Names exempt from boundness/rebinding checks: trusted-pure callees
+        # resolve to the module global (shadowing already excluded) and the
+        # ``len`` name is builtin-stable via the module-wide gate.  Every
+        # other name in a candidate -- proven-numeric operands and pure-call
+        # arguments alike -- must be definitely bound before the first
+        # occurrence and never rebound across the span.
+        stable = set(self._scope_pure)
+        if self._len_ok:
+            stable.add("len")
         for key, occurrences in collector.table.items():
             if len(occurrences) < 2:
                 continue
             first = occurrences[0][0]
             last = occurrences[-1][0]
             sample = occurrences[0][1]
-            # Only local names matter for boundness/rebinding; the ``len``
-            # name itself is builtin-stable via the module-wide gate.
             names = {
                 n.id for n in ast.walk(sample) if isinstance(n, ast.Name)
-            } & relevant
+            } - stable
             if not names <= bound_at[first]:
                 continue
             if any(names & rebinds[i] for i in range(first, last + 1)):

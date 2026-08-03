@@ -25,6 +25,16 @@ pure and total (see :func:`opast.analysis.hoistable_int_expr`):
 * contains at least one name (pure-constant expressions are left to the
   folding pass).
 
+Under the aggressive ``pure-calls`` option a call also qualifies when its
+callee is a trusted-pure module function (see
+:func:`opast.purity.trusted_pure_functions`; never shadowed in this scope
+or rebound in the loop) and every argument is a constant, an invariant
+definitely-bound name, a hoistable numeric expression, or another such
+call.  The option's stated assumption covers what this changes: the call
+may now run once before the loop instead of per iteration (or instead of
+never, for a zero-iteration loop), and the loop must not mutate the
+argument objects.
+
 Temporaries use the reserved ``_opast_inv_`` prefix; the counter starts
 above any existing suffix in the module.  Nested scopes inside loop bodies
 are never entered; module level is never hoisted (globals may be rebound by
@@ -40,6 +50,7 @@ from ..analysis import (
     AnnotationTrust,
     all_bound_names,
     binding_names,
+    bound_names,
     builtin_gate,
     contains_name,
     fresh_container_names,
@@ -116,11 +127,15 @@ class _Hoister(ast.NodeTransformer):
     """Replaces maximal hoistable subexpressions with temp names."""
 
     def __init__(self, ints: set[str], floats: set[str], containers: set[str],
-                 owner: "LoopInvariantMotion") -> None:
+                 owner: "LoopInvariantMotion",
+                 pure: frozenset = frozenset(),
+                 invariant_names: frozenset = frozenset()) -> None:
         self.ints = ints
         self.floats = floats
         self.containers = containers
         self.owner = owner
+        self.pure = pure
+        self.invariant_names = invariant_names
         self.temps: dict[str, tuple[str, ast.expr]] = {}
 
     def _skip(self, node: ast.AST) -> ast.AST:
@@ -131,10 +146,34 @@ class _Hoister(ast.NodeTransformer):
     visit_Lambda = _skip
     visit_ClassDef = _skip
 
+    def _pure_call(self, node: ast.AST) -> bool:
+        """Aggressive ``pure-calls``: a call to a trusted-pure module
+        function whose every argument is invariant and safe to evaluate."""
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in self.pure
+        ):
+            return False
+        return all(self._invariant_arg(a) for a in node.args) and all(
+            k.arg is not None and self._invariant_arg(k.value)
+            for k in node.keywords
+        )
+
+    def _invariant_arg(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant):
+            return True
+        if isinstance(node, ast.Name):
+            return isinstance(node.ctx, ast.Load) and node.id in self.invariant_names
+        if isinstance(node, ast.Call):
+            return self._pure_call(node)
+        return hoistable_num_expr(node, self.ints, self.floats, self.containers)
+
     def _maybe_hoist(self, node: ast.AST) -> ast.AST:
-        if hoistable_num_expr(
-            node, self.ints, self.floats, self.containers
-        ) and contains_name(node):
+        if (
+            hoistable_num_expr(node, self.ints, self.floats, self.containers)
+            and contains_name(node)
+        ) or self._pure_call(node):
             key = ast.dump(node)
             entry = self.temps.get(key)
             if entry is None:
@@ -198,7 +237,12 @@ class LoopInvariantMotion(ScopedTransformer):
             trusted=self._trust.floats(node),
             typed_calls=self._trust.float_returns,
         )
-        if ints or floats or containers:
+        # Trusted-pure callees must resolve to the module global: any local
+        # binding of the name in this scope shadows it.
+        self._scope_pure = (
+            self.pure_calls - bound_names(node) if self.pure_calls else frozenset()
+        )
+        if ints or floats or containers or self._scope_pure:
             # Parameters are bound on entry -- the dominance scan has to
             # start with them, or nothing involving a parameter is ever
             # "definitely bound before the loop".
@@ -264,9 +308,22 @@ class LoopInvariantMotion(ScopedTransformer):
         avail_containers = {
             n for n in containers if n in bound and n not in loop_bound
         }
-        if not avail_ints and not avail_floats and not avail_containers:
+        avail_pure = self._scope_pure - loop_bound
+        if (
+            not avail_ints
+            and not avail_floats
+            and not avail_containers
+            and not avail_pure
+        ):
             return []
-        hoister = _Hoister(avail_ints, avail_floats, avail_containers, self)
+        hoister = _Hoister(
+            avail_ints,
+            avail_floats,
+            avail_containers,
+            self,
+            pure=avail_pure,
+            invariant_names=frozenset(bound - loop_bound),
+        )
         if isinstance(loop, ast.While):
             loop.test = hoister.visit(loop.test)
         loop.body = [hoister.visit(s) for s in loop.body]

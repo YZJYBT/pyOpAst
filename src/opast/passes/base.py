@@ -22,6 +22,12 @@ class ScopedTransformer(ast.NodeTransformer):
     #: pipeline; see :data:`opast.pipeline.AGGRESSIVE_NAMES`).
     aggressive: frozenset = frozenset()
 
+    #: Module-level functions trusted as pure under the ``pure-calls``
+    #: aggressive option (set by the pipeline, decided once on the pristine
+    #: module; see :func:`opast.purity.trusted_pure_functions`).  Empty when
+    #: the option is off or this pass is not a consumer.
+    pure_calls: frozenset = frozenset()
+
     def __init__(self) -> None:
         self.changes = 0
         self.skipped_scopes = 0

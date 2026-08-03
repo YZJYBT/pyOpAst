@@ -97,6 +97,7 @@ AGGRESSIVE_NAMES = (
     "loop-state",
     "module-locals",
     "opt-imports",
+    "pure-calls",
     "slots",
     "tail-calls",
     "unbounded-recursion",
@@ -135,6 +136,14 @@ AGGRESSIVE_ASSUMPTIONS = {
         "temporaries, not part of the module's API (refines loop-state)"
     ),
     "opt-imports": "optimized imported modules are not monkeypatched",
+    "pure-calls": (
+        "module-level functions with no visibly effectful body are pure and "
+        "never rebound: their calls may be deduplicated, hoisted, or "
+        "dropped, so they may run at different times or not at all "
+        "(exceptions and non-termination inside them may move or vanish), "
+        "same-argument calls may share one result object, and argument "
+        "objects are not mutated across the optimized region"
+    ),
     "slots": (
         "classes gain __slots__: instances never receive attributes beyond "
         "those the class's own methods assign, and nothing relies on "
@@ -175,6 +184,11 @@ _AGGRESSIVE_CONSUMERS = {
     ),
     "module-locals": (ModuleLoopOutlining,),
     "loop-state": (ModuleLoopOutlining, LoopToComprehension),
+    "pure-calls": (
+        LoopInvariantMotion,
+        CommonSubexpressionElimination,
+        UnusedElimination,
+    ),
     "tail-calls": (TailRecursion,),
     "unbounded-recursion": (TailRecursion,),
 }
@@ -386,6 +400,14 @@ def optimize_ast(
         tree = slots_pass.run(tree)
         report.record(slots_pass)
         ast.fix_missing_locations(tree)
+    # Decided once, pre-loop, on the pristine module -- same reasoning as
+    # slots: purity rejections rest on module-wide evidence (a rebinding, an
+    # attribute store) that later passes may legitimately erase.
+    pure_set = frozenset()
+    if "pure-calls" in in_play:
+        from .purity import trusted_pure_functions
+
+        pure_set = trusted_pure_functions(tree)
     for iteration in range(max_iterations):
         iteration_changes = 0
         for pass_class in active:
@@ -400,6 +422,8 @@ def optimize_ast(
                 for name, consumers in _AGGRESSIVE_CONSUMERS.items()
                 if name in aggressive and pass_class in consumers
             )
+            if pure_set and pass_class in _AGGRESSIVE_CONSUMERS["pure-calls"]:
+                pass_.pure_calls = pure_set
             tree = pass_.run(tree)
             report.record(pass_)
             iteration_changes += pass_.changes
