@@ -10,11 +10,17 @@ decorated with :func:`opast.jitsupport.maybe_njit` when they are
   cold functions are not worth it;
 * **plausibly numba-compatible** by a strict whitelist: plain positional
   parameters (numeric constant defaults only), numeric constants, int/float
-  arithmetic, ``if``/``while``/``for``-over-``range``/``return``, calls
-  limited to ``range/abs/min/max/round/divmod/int/float/bool``, ``math.*``
-  and other candidate functions (see below), names limited to parameters
-  and locals.  No strings, containers, attributes (beyond ``math``),
-  subscripts, closures, globals, try/with/yield/async;
+  arithmetic, tuples (packing, unpacking, multiple returns, constant-index
+  reads -- numba's static_getitem types those even on heterogeneous
+  tuples), ``if``/``while``/``for``-over-``range``/``return``, calls
+  limited to ``range/abs/min/max/round/divmod/int/float/bool/len``,
+  ``math.*`` and other candidate functions (see below), names limited to
+  parameters, locals, and proven single-binding numeric/tuple module
+  constants (numba freezes globals at compile time; the single binding
+  makes the frozen value exact -- see :func:`frozen_const_globals`).  No
+  strings, lists/dicts/sets (reflected containers copy per call and are
+  deprecated), attributes beyond ``math``, variable-index or store
+  subscripts, closures, try/with/yield/async;
 * bound exactly once at module level, never ``global``-declared, and the
   module contains no dynamic constructs.
 
@@ -110,7 +116,8 @@ _OUTLINE_PREFIX = "_opast_jit_loop"
 _HOT_TRIP = 10_000
 
 _ALLOWED_CALLS = frozenset(
-    {"range", "abs", "min", "max", "round", "divmod", "int", "float", "bool"}
+    {"range", "abs", "min", "max", "round", "divmod", "int", "float", "bool",
+     "len"}
 )
 
 _ALLOWED_STMTS = (
@@ -136,7 +143,55 @@ _ALLOWED_EXPRS = (
     ast.Name,
     ast.Constant,
     ast.Attribute,
+    ast.Subscript,
 )
+
+
+def _const_int_index(node: ast.expr) -> bool:
+    """A literal (possibly negated) int index -- numba's static_getitem
+    handles it on heterogeneous tuples, where a runtime index would not
+    type."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        node = node.operand
+    return isinstance(node, ast.Constant) and type(node.value) is int
+
+
+def frozen_const_globals(tree: ast.Module) -> frozenset[str]:
+    """Module-level names safe to leave as global reads in a candidate:
+    bound exactly once at module top level to a numeric/bool literal (or a
+    tuple of those), and never ``global``-declared.  numba freezes globals
+    to their compile-time values; the single proven binding makes that
+    value the only one the name can ever hold, so freezing is exact.
+    """
+    counts: Counter[str] = Counter()
+    for n in iter_region(tree):
+        counts.update(binding_names(n))
+    declared: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Global):
+            declared.update(n.names)
+    consts: set[str] = set()
+    for stmt in tree.body:
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and counts.get(stmt.targets[0].id, 0) == 1
+            and stmt.targets[0].id not in declared
+            and _frozen_value(stmt.value)
+        ):
+            consts.add(stmt.targets[0].id)
+    return frozenset(consts)
+
+
+def _frozen_value(node: ast.expr) -> bool:
+    if isinstance(node, ast.Constant):
+        return type(node.value) in (int, float, bool, complex)
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        return _frozen_value(node.operand)
+    if isinstance(node, ast.Tuple) and isinstance(node.ctx, ast.Load):
+        return all(_frozen_value(e) for e in node.elts)
+    return False
 
 _ALLOWED_CONST_TYPES = (int, float, bool, complex, type(None))
 
@@ -164,11 +219,15 @@ def _local_names(func: ast.FunctionDef) -> set[str]:
 
 
 def _numba_compatible(
-    func: ast.FunctionDef, math_ok: bool, peers: frozenset[str] = frozenset()
+    func: ast.FunctionDef,
+    math_ok: bool,
+    peers: frozenset[str] = frozenset(),
+    consts: frozenset[str] = frozenset(),
 ) -> bool:
     """*peers* are other jit candidates that may be called (call position
     only -- a bare load of a peer would hand numba the fallback wrapper,
-    which it cannot type)."""
+    which it cannot type).  *consts* are proven single-binding module
+    constants (see :func:`frozen_const_globals`) numba may freeze."""
     args = func.args
     if args.vararg or args.kwarg or args.kwonlyargs or args.posonlyargs:
         return False
@@ -180,7 +239,7 @@ def _numba_compatible(
             return False
 
     own_names = {a.arg for a in args.args} | _local_names(func)
-    allowed_names = own_names | _ALLOWED_CALLS
+    allowed_names = own_names | _ALLOWED_CALLS | consts
     if math_ok:
         allowed_names.add("math")
 
@@ -231,6 +290,16 @@ def _numba_compatible(
                     and isinstance(node.value, ast.Name)
                     and node.value.id == "math"
                     and isinstance(node.ctx, ast.Load)
+                ):
+                    return False
+            elif isinstance(node, ast.Subscript):
+                # Constant-index reads only: tuple element access.  The
+                # runtime fallback covers a non-indexable value; a variable
+                # index on a heterogeneous tuple would not type, so it is
+                # not predicted to compile.
+                if not (
+                    isinstance(node.ctx, ast.Load)
+                    and _const_int_index(node.slice)
                 ):
                     return False
             elif isinstance(node, ast.Call):
@@ -742,6 +811,7 @@ class JitInjection:
             and any(a.name == "math" and a.asname is None for a in s.names)
             for s in tree.body
         )
+        consts = frozen_const_globals(tree)
 
         helper = _HELPER_NAME
         taken = all_bound_names(tree) | {
@@ -766,7 +836,7 @@ class JitInjection:
             compatible = {
                 name: fn
                 for name, fn in candidates.items()
-                if _numba_compatible(fn, math_ok, peers=peer_names)
+                if _numba_compatible(fn, math_ok, peers=peer_names, consts=consts)
             }
             calls = {
                 name: _peer_calls(fn, frozenset(compatible))

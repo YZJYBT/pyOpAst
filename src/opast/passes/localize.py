@@ -49,11 +49,10 @@ _TEMP_PREFIX = "_opast_glb"
 
 _COMP_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
-#: Builtins the numba whitelist may call by name (opast.passes.jit); kept as
-#: globals under --jit so jitted functions still type-check.
-_JIT_WHITELIST_BUILTINS = frozenset(
-    {"range", "abs", "min", "max", "round", "divmod", "int", "float", "bool"}
-)
+#: Builtins the numba whitelist may call by name; kept as globals under
+#: --jit so jitted functions still type-check.  Single source of truth in
+#: the jit pass -- a name localized here would silently evict candidates.
+from .jit import _ALLOWED_CALLS as _JIT_WHITELIST_BUILTINS  # noqa: E402
 
 
 def _region_nodes(roots):

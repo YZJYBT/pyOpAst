@@ -261,7 +261,7 @@ opast --jit hot_script.py
 流水线收敛后运行一次性 `jit` pass:对**未被内联**的模块级函数,若同时满足——
 
 - **热点启发**:含嵌套循环,或某循环迭代次数可静态估算 ≥ 10000(`range(常量)` / `while name < 常量`);
-- **numba 白名单**:仅数值常量与 int/float 算术、`if`/`while`/`for range()`/`return`、调用仅限 `range/abs/min/max/round/divmod/int/float/bool`、`math.*` 与**其他白名单候选函数**(见下)、名字仅限参数和局部变量;无字符串/容器/下标/属性(math 除外)/闭包/全局读写/try/yield;
+- **numba 白名单**:仅数值常量与 int/float 算术、元组(打包/解包/多返回值/常量下标读取——numba 的 static_getitem 对异构元组也能类型化)、`if`/`while`/`for range()`/`return`、调用仅限 `range/abs/min/max/round/divmod/int/float/bool/len`、`math.*` 与**其他白名单候选函数**(见下)、名字仅限参数、局部变量与**可证单绑定的数值/元组模块常量**(numba 把全局冻结为编译期值,单绑定证明让冻结精确无误);无字符串、无 list/dict/set(反射容器每次调用整表复制且已弃用)、无变量下标或下标写入、无属性(math 除外)/闭包/try/yield;
 - 模块无动态构造、函数名只绑定一次且未被 `global` 声明——
 
 则加上 `@_opast_jit.maybe_njit` 装饰(注入 `import opast.jitsupport`)。
