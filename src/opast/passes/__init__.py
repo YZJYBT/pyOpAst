@@ -8,6 +8,7 @@ from .condnarrow import ConditionNarrowing
 from .cse import CommonSubexpressionElimination
 from .deadcode import DeadCodeElimination
 from .dedynamize import DeDynamize
+from .fission import LoopFission
 from .folding import ConstantFolding
 from .inline import FunctionInlining
 from .licm import LoopInvariantMotion
@@ -40,6 +41,7 @@ __all__ = [
     "SlotsInjection",
     "TailRecursion",
     "RangeToIteration",
+    "LoopFission",
     "LoopToComprehension",
     "ComprehensionToMap",
     "ModuleLoopOutlining",

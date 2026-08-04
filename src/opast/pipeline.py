@@ -67,6 +67,10 @@ PASS_CLASSES = (
     # leaves behind feed const-prop / CSE / unused next iteration.
     ScalarReplacement,
 
+    # Loop fission (passes/fission.py) sat here, before loop-to-comp, and
+    # is complete but deliberately unregistered: measured 0.88-1.02x on
+    # 3.14 -- the second traversal costs more than LIST_APPEND buys.  It
+    # waits for a numpy vectorization consumer.
     LoopToComprehension,  # picks up range-to-iter output in the same pass
     ComprehensionToMap,
     # Late: every other pass gets to work on the loop while it is still a
