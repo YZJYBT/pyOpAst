@@ -17,6 +17,26 @@ from .pipeline import (
 )
 
 
+def echo(text: str, file=None) -> None:
+    """CLI-safe print: never raise ``UnicodeEncodeError`` on a console whose
+    locale codepage (GBK, cp1252, ...) cannot represent some character of
+    the optimized source.  Offending characters degrade to backslash
+    escapes.  Deliberately *not* a stream ``reconfigure()``: the stream is
+    left untouched, so the optimized program's own printing behaviour --
+    including an authentic ``UnicodeEncodeError`` of its own -- is
+    unaffected.  Files are always written UTF-8 elsewhere.
+    """
+    out = sys.stdout if file is None else file
+    try:
+        print(text, file=out)
+    except UnicodeEncodeError:
+        encoding = getattr(out, "encoding", None) or "utf-8"
+        fallback = text.encode(encoding, "backslashreplace").decode(
+            encoding, "replace"
+        )
+        print(fallback, file=out)
+
+
 def _materialize_source(result: OptimizationResult) -> str:
     """Write the optimized source to a stable temp file and return its path.
 

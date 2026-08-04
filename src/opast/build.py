@@ -50,6 +50,7 @@ from .pipeline import (
     optimize_file,
     rewrite_aggressive_argv,
 )
+from .runner import echo
 
 #: Options taking a space-separated value (for rewrite_aggressive_argv).
 _VALUE_OPTIONS = frozenset(
@@ -110,7 +111,7 @@ def _optimize_one(
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         stats.fallbacks.append(src)
-        print(
+        echo(
             f"opast.build: {rel}: {type(exc).__name__}: {exc} "
             f"-- copied unchanged",
             file=sys.stderr,
@@ -124,7 +125,7 @@ def _optimize_one(
         stats.changed_files += 1
         stats.total_changes += changes
         if not ns.quiet:
-            print(f"{rel}: {changes} change(s)")
+            echo(f"{rel}: {changes} change(s)")
     for name, pass_stats in result.report.per_pass.items():
         stats.per_pass[name] += pass_stats.changes
     stats.in_play |= set(result.report.aggressive)

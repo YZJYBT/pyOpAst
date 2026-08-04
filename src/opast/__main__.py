@@ -18,7 +18,7 @@ from .pipeline import (
     optimize_source,
     rewrite_aggressive_argv,
 )
-from .runner import execute
+from .runner import echo, execute
 
 
 #: Our options that take a space-separated value -- rewrite_aggressive_argv
@@ -133,13 +133,13 @@ def main(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
     if ns.show:
-        print(result.source)
+        echo(result.source)
     if ns.output:
         Path(ns.output).write_text(result.source + "\n", encoding="utf-8")
     if ns.report:
         if hook_planned and "opt-imports" in aggressive:
             result.report.aggressive |= {"opt-imports"}
-        print(result.report.summary(), file=sys.stderr)
+        echo(result.report.summary(), file=sys.stderr)
     if not ns.no_run:
         finder = None
         if ns.opt_imports or ns.opt_imports_under:
