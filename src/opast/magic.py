@@ -4,12 +4,17 @@ Usage::
 
     %load_ext opast          # or: %load_ext opast.magic
 
-    %%opast [--show] [--report] [--no-run] [--jit] [--disable PASSES]
-            [--max-iterations N]
+    %%opast [--show] [--report] [--no-run] [--jit] [--aggressive[=OPTIONS]]
+            [--disable PASSES] [--max-iterations N]
     total = 0
     for i in range(50_000):
         total += i * 2
     total
+
+``--aggressive`` mirrors the CLI's ``-O3``: bare it enables every option in
+:data:`opast.pipeline.AGGRESSIVE_NAMES`, or pass a comma-separated subset
+(``--aggressive=annotations,numpy``).  ``--report`` then lists the
+assumptions actually in play.
 
 The cell is optimized with the regular pipeline and executed in the
 interactive namespace, so assignments persist across cells and a trailing
@@ -23,6 +28,12 @@ Caveats specific to notebooks:
   and the builtin-shadowing checks) judge only the current cell.  If an
   earlier cell rebinds a builtin (``range = ...``), disable the affected
   passes or don't use the magic on cells relying on it.
+* The same cut works the other way for evidence *this* cell lacks: purity
+  trust (``pure-calls``), ``slots`` and the jit whitelist's ``math``/numpy
+  roots and NDArray annotations are all established from what the cell
+  itself contains.  Keep the imports, type aliases and helper definitions a
+  hot function depends on in the *same* cell, or those options simply find
+  nothing to act on.
 * The cell must be pure Python -- other magics or ``!`` shell escapes inside
   the cell can't be parsed and raise ``SyntaxError``.
 * ``--jit`` inherits the CLI's opt-in caveats (int64 wraparound, see README)
