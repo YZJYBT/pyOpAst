@@ -28,6 +28,7 @@ from .passes import (
     SlotsInjection,
     TailRecursion,
     UnusedElimination,
+    VectorizeLoops,
 )
 
 #: Pass order within one iteration.  De-dynamization runs first: expanding
@@ -85,7 +86,10 @@ PASS_CLASSES = (
 #: the pristine module *before* the fixpoint loop, because its rejections
 #: rest on module-wide evidence (a ``setattr`` reference, a class alias)
 #: that later passes may legitimately erase.
-PASS_NAMES = tuple(cls.name for cls in PASS_CLASSES) + (SlotsInjection.name,)
+PASS_NAMES = tuple(cls.name for cls in PASS_CLASSES) + (
+    SlotsInjection.name,
+    VectorizeLoops.name,
+)
 
 DEFAULT_MAX_ITERATIONS = 8
 
@@ -100,6 +104,7 @@ AGGRESSIVE_NAMES = (
     "jit",
     "loop-state",
     "module-locals",
+    "numpy",
     "opt-imports",
     "pure-calls",
     "slots",
@@ -138,6 +143,13 @@ AGGRESSIVE_ASSUMPTIONS = {
     "module-locals": (
         "module-level names that nothing in the module reads are private "
         "temporaries, not part of the module's API (refines loop-state)"
+    ),
+    "numpy": (
+        "numeric loops over proven sequences may run as numpy vector "
+        "operations: intermediates are fixed-width int64/float64 (large "
+        "ints wrap instead of growing), a float reduction is reassociated "
+        "into one partial sum, and numpy must be importable for the fast "
+        "path (everything stays plain Python otherwise)"
     ),
     "opt-imports": "optimized imported modules are not monkeypatched",
     "pure-calls": (
@@ -372,6 +384,7 @@ def optimize_ast(
     aggressive = normalize_aggressive(aggressive)
     jit = (jit or "jit" in aggressive) and "jit" not in disabled
     slots = "slots" in aggressive and SlotsInjection.name not in disabled
+    vectorize = "numpy" in aggressive and VectorizeLoops.name not in disabled
     active = [cls for cls in PASS_CLASSES if cls.name not in disabled]
     # An assumption is only worth reporting when something actually acts on
     # it: ``--disable`` can switch off the jit pass or an option's every
@@ -392,6 +405,8 @@ def optimize_ast(
         in_play.add("jit")
     if slots:
         in_play.add("slots")
+    if vectorize:
+        in_play.add("numpy")
     report = OptimizationReport(aggressive=frozenset(in_play))
     if slots:
         # One-shot, before the fixpoint: the pass's rejections rest on
@@ -435,6 +450,14 @@ def optimize_ast(
         report.iterations = iteration + 1
         if not iteration_changes:
             break
+    if vectorize:
+        # One-shot, after the fixpoint (the loop shapes it matches are the
+        # fixpoint's *output* -- loop-to-comp comprehensions) and before the
+        # jit pass (which skips the generated ``_opast_vec`` helpers).
+        vec_pass = VectorizeLoops()
+        tree = vec_pass.run(tree)
+        report.record(vec_pass)
+        ast.fix_missing_locations(tree)
     if jit:
         # One-shot, after the fixpoint: decorates hot numeric functions with
         # opast.jitsupport.maybe_njit (opt-in, see README caveats).

@@ -120,6 +120,20 @@ _ALLOWED_CALLS = frozenset(
      "len"}
 )
 
+#: numpy functions numba's nopython mode supports well; attribute access on
+#: the proven numpy root is limited to these (Load), calls included.
+_NP_FUNCS = frozenset({
+    "abs", "arange", "array", "asarray", "ceil", "cos", "dot", "empty",
+    "exp", "floor", "full", "log", "maximum", "mean", "minimum", "ones",
+    "prod", "sin", "sqrt", "sum", "tan", "zeros",
+})
+
+#: The subset that provably yields an ndarray -- locals bound once from one
+#: of these calls may be subscript-stored (``buf[i] = x``).
+_NP_CTORS = frozenset(
+    {"arange", "array", "asarray", "empty", "full", "ones", "zeros"}
+)
+
 _ALLOWED_STMTS = (
     ast.Return,
     ast.Assign,
@@ -218,16 +232,47 @@ def _local_names(func: ast.FunctionDef) -> set[str]:
     return names
 
 
+def _np_locals(func: ast.FunctionDef, np_root: str) -> frozenset[str]:
+    """Locals bound exactly once, from a ``np.<ctor>(...)`` call: provably
+    ndarrays, so subscript stores on them are in-bounds-checked array
+    writes (an IndexError is identical in both paths)."""
+    counts: Counter[str] = Counter()
+    for n in ast.walk(func):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            counts[n.id] += 1
+        elif isinstance(n, ast.arg):
+            counts[n.arg] += 1
+    out: set[str] = set()
+    for n in ast.walk(func):
+        if (
+            isinstance(n, ast.Assign)
+            and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name)
+            and counts[n.targets[0].id] == 1
+            and isinstance(n.value, ast.Call)
+            and isinstance(n.value.func, ast.Attribute)
+            and isinstance(n.value.func.value, ast.Name)
+            and n.value.func.value.id == np_root
+            and n.value.func.attr in _NP_CTORS
+        ):
+            out.add(n.targets[0].id)
+    return frozenset(out)
+
+
 def _numba_compatible(
     func: ast.FunctionDef,
     math_ok: bool,
     peers: frozenset[str] = frozenset(),
     consts: frozenset[str] = frozenset(),
+    np_root: str | None = None,
 ) -> bool:
     """*peers* are other jit candidates that may be called (call position
     only -- a bare load of a peer would hand numba the fallback wrapper,
     which it cannot type).  *consts* are proven single-binding module
-    constants (see :func:`frozen_const_globals`) numba may freeze."""
+    constants (see :func:`frozen_const_globals`) numba may freeze.
+    *np_root* is the proven single-binding numpy import alias, unlocking
+    ``np.<whitelisted>`` calls, variable-index subscript reads, and
+    subscript stores on locals provably bound to ``np`` constructors."""
     args = func.args
     if args.vararg or args.kwarg or args.kwonlyargs or args.posonlyargs:
         return False
@@ -242,6 +287,12 @@ def _numba_compatible(
     allowed_names = own_names | _ALLOWED_CALLS | consts
     if math_ok:
         allowed_names.add("math")
+    np_arrays: frozenset[str] = frozenset()
+    if np_root is not None and np_root not in own_names:
+        allowed_names.add(np_root)
+        np_arrays = _np_locals(func, np_root)
+    else:
+        np_root = None  # a local shadowing the alias disables numpy trust
 
     body = list(func.body)
     if (
@@ -260,10 +311,24 @@ def _numba_compatible(
                 return False
             if isinstance(node, ast.Assign):
                 for t in node.targets:
-                    if not isinstance(t, (ast.Name, ast.Tuple)):
-                        return False
+                    if isinstance(t, (ast.Name, ast.Tuple)):
+                        continue
+                    if (
+                        isinstance(t, ast.Subscript)
+                        and isinstance(t.value, ast.Name)
+                        and t.value.id in np_arrays
+                    ):
+                        continue
+                    return False
             elif isinstance(node, ast.AugAssign):
-                if not isinstance(node.target, ast.Name):
+                if not (
+                    isinstance(node.target, ast.Name)
+                    or (
+                        isinstance(node.target, ast.Subscript)
+                        and isinstance(node.target.value, ast.Name)
+                        and node.target.value.id in np_arrays
+                    )
+                ):
                     return False
             elif isinstance(node, ast.For):
                 if node.orelse or not isinstance(node.target, ast.Name):
@@ -285,21 +350,33 @@ def _numba_compatible(
                 if type(node.value) not in _ALLOWED_CONST_TYPES:
                     return False
             elif isinstance(node, ast.Attribute):
-                if not (
+                math_attr = (
                     math_ok
                     and isinstance(node.value, ast.Name)
                     and node.value.id == "math"
                     and isinstance(node.ctx, ast.Load)
-                ):
+                )
+                np_attr = (
+                    np_root is not None
+                    and isinstance(node.value, ast.Name)
+                    and node.value.id == np_root
+                    and node.attr in _NP_FUNCS
+                    and isinstance(node.ctx, ast.Load)
+                )
+                if not (math_attr or np_attr):
                     return False
             elif isinstance(node, ast.Subscript):
-                # Constant-index reads only: tuple element access.  The
-                # runtime fallback covers a non-indexable value; a variable
-                # index on a heterogeneous tuple would not type, so it is
-                # not predicted to compile.
-                if not (
-                    isinstance(node.ctx, ast.Load)
-                    and _const_int_index(node.slice)
+                # Reads: constant index always (tuple element access via
+                # static_getitem); any index once a proven numpy import is
+                # in scope (arrays and homogeneous tuples type it; anything
+                # else fails to compile and falls back).  Stores: proven
+                # ndarray locals only.
+                if isinstance(node.ctx, ast.Load):
+                    if not (np_root is not None or _const_int_index(node.slice)):
+                        return False
+                elif not (
+                    isinstance(node.value, ast.Name)
+                    and node.value.id in np_arrays
                 ):
                     return False
             elif isinstance(node, ast.Call):
@@ -319,7 +396,14 @@ def _numba_compatible(
                     and isinstance(fn.value, ast.Name)
                     and fn.value.id == "math"
                 )
-                if not (name_ok or math_call or peer_call):
+                np_call = (
+                    np_root is not None
+                    and isinstance(fn, ast.Attribute)
+                    and isinstance(fn.value, ast.Name)
+                    and fn.value.id == np_root
+                    and fn.attr in _NP_FUNCS
+                )
+                if not (name_ok or math_call or np_call or peer_call):
                     return False
                 if node.keywords or any(
                     isinstance(a, ast.Starred) for a in node.args
@@ -584,10 +668,12 @@ class _LoopOutliner:
     decorated with ``maybe_njit`` (see module docstring)."""
 
     def __init__(self, owner, tree: ast.Module, math_ok: bool,
-                 helper: str, taken: set[str]) -> None:
+                 helper: str, taken: set[str],
+                 np_root: str | None = None) -> None:
         self.owner = owner
         self.tree = tree
         self.math_ok = math_ok
+        self.np_root = np_root
         self.helper = helper
         self.taken = taken
         self.tree_binds = _bind_counts(tree)
@@ -670,6 +756,9 @@ class _LoopOutliner:
             if n == "math":
                 if self.math_ok and self.tree_binds["math"] == 1:
                     special.add(n)
+            elif n == self.np_root:
+                if self.tree_binds[n] == 1:
+                    special.add(n)
             elif n in _ALLOWED_CALLS and self.tree_binds[n] == 0:
                 special.add(n)
 
@@ -723,7 +812,7 @@ class _LoopOutliner:
             )
         ]
         ast.copy_location(fn, loop)
-        if not _numba_compatible(fn, self.math_ok):
+        if not _numba_compatible(fn, self.math_ok, np_root=self.np_root):
             return None
 
         call = ast.Call(
@@ -812,6 +901,14 @@ class JitInjection:
             for s in tree.body
         )
         consts = frozen_const_globals(tree)
+        np_root = None
+        for s in tree.body:
+            if isinstance(s, ast.Import):
+                for a in s.names:
+                    if a.name == "numpy":
+                        root = a.asname or "numpy"
+                        if module_counts.get(root, 0) == 1:
+                            np_root = root
 
         helper = _HELPER_NAME
         taken = all_bound_names(tree) | {
@@ -829,6 +926,11 @@ class JitInjection:
                 continue
             if module_counts.get(stmt.name, 0) != 1 or stmt.name in global_declared:
                 continue
+            if stmt.name.startswith("_opast_vec"):
+                # Vectorizer helpers: the numpy version takes the numpy
+                # module as a parameter (untypeable), and decorating the
+                # Python fallback would stack dispatchers.
+                continue
             candidates[stmt.name] = stmt
         calls: dict[str, set[str]] = {}
         while True:
@@ -836,7 +938,9 @@ class JitInjection:
             compatible = {
                 name: fn
                 for name, fn in candidates.items()
-                if _numba_compatible(fn, math_ok, peers=peer_names, consts=consts)
+                if _numba_compatible(
+                    fn, math_ok, peers=peer_names, consts=consts, np_root=np_root
+                )
             }
             calls = {
                 name: _peer_calls(fn, frozenset(compatible))
@@ -871,7 +975,8 @@ class JitInjection:
             if latent:
                 lazy[name] = bounds
 
-        outliner = _LoopOutliner(self, tree, math_ok, helper, taken)
+        outliner = _LoopOutliner(self, tree, math_ok, helper, taken,
+                                 np_root=np_root)
         outlined = outliner.outline({id(f) for f in selected})
         if not selected and not outlined and not lazy:
             return tree

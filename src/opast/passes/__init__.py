@@ -22,6 +22,7 @@ from .scalarrepl import ScalarReplacement
 from .slotify import SlotsInjection
 from .tailcall import TailRecursion
 from .unused import UnusedElimination
+from .vectorize import VectorizeLoops
 
 __all__ = [
     "ScopedTransformer",
@@ -46,4 +47,5 @@ __all__ = [
     "ComprehensionToMap",
     "ModuleLoopOutlining",
     "GlobalLocalization",
+    "VectorizeLoops",
 ]

@@ -157,6 +157,19 @@ class GlobalLocalization(ScopedTransformer):
             if c == 1 and name in direct_index and name not in global_declared
         }
 
+        # Under --jit, the whitelist roots (``math``, a single-binding numpy
+        # import alias) must stay global references: a localized alias would
+        # evict otherwise-eligible candidates from numba's typing.
+        self._jit_roots: set[str] = set()
+        if self.jit_mode:
+            for stmt in tree.body:
+                if isinstance(stmt, ast.Import):
+                    for alias in stmt.names:
+                        if alias.name in ("math", "numpy"):
+                            root = alias.asname or alias.name
+                            if counts.get(root, 0) == 1:
+                                self._jit_roots.add(root)
+
         self._counter = 0
         for n in ast.walk(tree):
             ident = None
@@ -214,7 +227,9 @@ class GlobalLocalization(ScopedTransformer):
             return False
         if any(name in scope for scope in self._scopes):
             return False  # a local (or shadowed) name, not a stable global
-        if self.jit_mode and name in _JIT_WHITELIST_BUILTINS:
+        if self.jit_mode and (
+            name in _JIT_WHITELIST_BUILTINS or name in self._jit_roots
+        ):
             return False
         binding_idx = self._module_single.get(name)
         if binding_idx is not None:

@@ -290,6 +290,9 @@ def fresh_container_names(scope: ast.AST) -> frozenset[str]:
             allowed = True
         elif isinstance(parent, (ast.For, ast.AsyncFor)) and parent.iter is n:
             allowed = True
+        elif isinstance(parent, ast.comprehension) and parent.iter is n:
+            # Same read-only iteration as a ``for`` statement.
+            allowed = True
         elif isinstance(parent, (ast.If, ast.While)) and parent.test is n:
             allowed = True
         if not allowed:
