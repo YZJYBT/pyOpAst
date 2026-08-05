@@ -2,9 +2,11 @@
 
 ## 未发布
 
-**新增 `DynArray` 标记容器**(`from opast import DynArray`,`opast/containers.py`)——一个普通的 `list` 子类:在 jit 函数之外、以及任何没跑过 opast 的解释器里它**就是 list**(零依赖、零改写)。使用它即声明静态分析无法证明的契约:元素同构数值、不依赖容器标识与具体类型、不离开创建它的函数。jit 路径据此在**编译副本里**换表示(原函数原样保留为 Python 回退,编译失败/无 numba 均逐字正确):`DynArray()` + `append`/`pop` → numba 列表 `[]`(动态容量,数组做不到),400k 单调栈实测 **32x**;`DynArray.zeros(n)`/`.full(n, v)` → 模块有 numpy 导入时换 `np.zeros`/`np.full`,否则仍是列表,100 万次更新直方图实测 **21x**。`dtype` 显式(float64/int64)保证两种表示逐元素一致。机械可查的部分全部验证:单次绑定、不返回不外传不别名、增长方法仅限可增长形态、未建模的方法(如 `insert`)整函数拒绝;真值测试在副本里改写为 `len(x) > 0`(不赌 numba 对容器真值的支持)。诚实数据:每轮新建又丢弃的短命容器实测 1.07x(分配成本占满),文档已写明"让它活过热循环"。
+**新增 `DynArray` 标记容器**(`from opast import DynArray`,`opast/containers.py`)——一个普通的 `list` 子类:在 jit 函数之外、以及任何没跑过 opast 的解释器里它**就是 list**(零依赖、零改写)。使用它即声明静态分析无法证明的契约:元素同构数值、不依赖容器标识与具体类型、不离开创建它的函数。jit 路径据此在**编译副本里**换表示(原函数原样保留为 Python 回退,编译失败/无 numba 均逐字正确):`DynArray()` + `append`/`pop` → numba 列表 `[]`(动态容量,数组做不到),400k 单调栈实测 **32x**;`DynArray.zeros(n)`/`.full(n, v)` → 模块有 numpy 导入时换 `np.zeros`/`np.full`,否则仍是列表,100 万次更新直方图实测 **37x**。`dtype` 显式(float64/int64)保证两种表示逐元素一致。机械可查的部分全部验证:单次绑定、不返回不外传不别名、增长方法仅限可增长形态、未建模的方法(如 `insert`)整函数拒绝;真值测试在副本里改写为 `len(x) > 0`(不赌 numba 对容器真值的支持)。诚实数据:每轮新建又丢弃的短命容器实测 1.07x(分配成本占满),文档已写明"让它活过热循环"。
 
 配套白名单扩展:`ast.Expr` 进语句白名单(仅限 DynArray 增长调用)、`for v in <DynArray 局部>` 迭代、下标读写与 `+=`、`DynArray.zeros(n, dtype=int)` 的关键字实参。
+
+**修复**:`unused` 会在 jit pass 之前删掉"只被将来的改写读取"的 numpy 导入(模块里除 `DynArray.zeros` 外无人用 `np` 时),定容路径因此静默退化成列表——jit 模式下 numpy/math 导入现在一律保留(与 localize 同一条通用规则:白名单根不许被抹掉;非 jit 构建照旧清理)。修复后定容直方图从退化的 21x 恢复为 **37x**。
 
 **修复**:localize 在 jit 模式下会别名化模块级**导入绑定**(`DynArray`、`from x import y` 等),使其从 numba 白名单识别中消失——现在所有单绑定模块级导入名在 jit 模式下一律保持全局引用(这类"别名藏掉白名单根"的 bug 已是第三次,故改为通用规则)。
 

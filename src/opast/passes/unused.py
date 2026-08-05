@@ -104,8 +104,19 @@ def _binds_dunder_all(stmt: ast.AST) -> bool:
     return False
 
 
+#: Import roots the numba whitelist keys on.  Under ``--jit`` these must
+#: survive even when nothing in the *current* source reads them: the jit
+#: pass runs after the fixpoint and may introduce reads itself (a
+#: ``DynArray.zeros(n)`` buffer becomes ``np.zeros(n)`` in the compiled
+#: copy), so removing the import here would silently downgrade it.
+_JIT_IMPORT_ROOTS = frozenset({"numpy", "math"})
+
+
 class UnusedElimination(ScopedTransformer):
     name = "unused"
+
+    #: Set by the pipeline when the jit pass will run (see above).
+    jit_mode: bool = False
 
     def __init__(self) -> None:
         super().__init__()
@@ -134,6 +145,12 @@ class UnusedElimination(ScopedTransformer):
 
     def _module_used(self, module: ast.Module) -> set[str] | None:
         used = _used_names(module)
+        if self.jit_mode:
+            for stmt in module.body:
+                if isinstance(stmt, ast.Import):
+                    for alias in stmt.names:
+                        if alias.name.split(".")[0] in _JIT_IMPORT_ROOTS:
+                            used.add(alias.asname or alias.name.split(".")[0])
         for stmt in iter_region(module):
             if not _binds_dunder_all(stmt):
                 continue

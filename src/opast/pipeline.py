@@ -431,9 +431,10 @@ def optimize_ast(
         iteration_changes = 0
         for pass_class in active:
             pass_ = pass_class()
-            if pass_class is GlobalLocalization:
-                # Under --jit, keep numba-whitelist builtins as globals so
-                # jit candidates still pass numba's typing.
+            if pass_class in (GlobalLocalization, UnusedElimination):
+                # Under --jit, keep the names numba's whitelist keys on:
+                # localize must not alias them, and unused must not drop a
+                # numpy import the jit pass is about to start reading.
                 pass_.jit_mode = jit
             # Each pass picks the options it understands out of the set.
             pass_.aggressive = frozenset(
