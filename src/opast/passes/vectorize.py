@@ -3,7 +3,9 @@
 One-shot pass executed once after the optimization fixpoint (before the
 jit pass).  Two loop shapes are extracted into generated module-level
 helper pairs -- an exact-Python version and a numpy version -- joined by
-:func:`opast.jitsupport.vector_dispatch`:
+a **self-contained dispatcher embedded into the output** (the optimized
+source keeps zero runtime dependencies: no opast, and numpy strictly
+optional -- ``-O3 --disable jit`` builds stay dependency-free):
 
 * **maps**: ``acc = [ELT for v in xs]`` (the shape ``loop-to-comp``
   produces) becomes ``acc = _opast_vecN(xs, <invariants...>)``;
@@ -62,7 +64,63 @@ from .fission import _reiterable_names
 from .licm import container_gate
 
 _PREFIX = "_opast_vec"
-_HELPER = "_opast_vh"
+
+#: Self-contained runtime injected once per module that gets any rewrite:
+#: the optimized output must run with **zero** dependencies -- no opast, no
+#: numpy (``--disable jit`` aggressive builds are documented dependency-
+#: free, and vectorization must not break that).  Mirrors
+#: ``jitsupport``'s dispatch discipline: first-call verification against
+#: the exact Python result, per-site permanent fallback on any exception,
+#: mismatch, or absent numpy; the numpy path runs under
+#: ``errstate(divide/invalid='raise')`` so a zero divisor becomes a
+#: fallback that re-runs (and re-raises) the exact original computation.
+_RUNTIME = '''
+def _opast_vec_match(_e, _g):
+    if isinstance(_e, (list, tuple)) and isinstance(_g, (list, tuple)):
+        return len(_e) == len(_g) and all(
+            _opast_vec_match(_a, _b) for _a, _b in zip(_e, _g)
+        )
+    if isinstance(_e, float) or isinstance(_g, float):
+        _e, _g = float(_e), float(_g)
+        if _e != _e and _g != _g:
+            return True
+        return _e == _g or abs(_e - _g) <= 1e-12 * max(abs(_e), abs(_g), 1.0)
+    return type(_e) is type(_g) and _e == _g
+
+def _opast_vector_dispatch(_py, _np_fn):
+    _state = []
+    _verify = not __import__("os").environ.get("OPAST_JIT_NO_VERIFY")
+
+    def _call(*_args):
+        if _state and _state[0] == "python":
+            return _py(*_args)
+        try:
+            import numpy as _np
+        except Exception:
+            _state[:] = ["python"]
+            return _py(*_args)
+        if _state and _state[0] == "numpy":
+            try:
+                with _np.errstate(divide="raise", invalid="raise"):
+                    return _np_fn(_np, *_args)
+            except Exception:
+                _state[:] = ["python"]
+                return _py(*_args)
+        _expected = _py(*_args)
+        if not _verify:
+            _state[:] = ["numpy"]
+            return _expected
+        try:
+            with _np.errstate(divide="raise", invalid="raise"):
+                _got = _np_fn(_np, *_args)
+        except Exception:
+            _state[:] = ["python"]
+            return _expected
+        _state[:] = ["numpy" if _opast_vec_match(_expected, _got) else "python"]
+        return _expected
+
+    return _call
+'''
 
 _VEC_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow)
 _VEC_UNARY = (ast.USub, ast.UAdd)
@@ -176,9 +234,6 @@ class VectorizeLoops(ScopedTransformer):
                 digits = name[len(_PREFIX):].split("_")[0]
                 if digits.isdigit():
                     self._counter = max(self._counter, int(digits) + 1)
-        self._helper = _HELPER
-        while self._helper in taken:
-            self._helper += "_"
 
         new_body: list[ast.stmt] = []
         for stmt in tree.body:
@@ -206,10 +261,7 @@ class VectorizeLoops(ScopedTransformer):
                     insert_at = i + 1
                     continue
                 break
-            imp = ast.Import(
-                names=[ast.alias(name="opast.jitsupport", asname=self._helper)]
-            )
-            tree.body.insert(insert_at, imp)
+            tree.body[insert_at:insert_at] = ast.parse(_RUNTIME).body
             ast.fix_missing_locations(tree)
         return tree
 
@@ -428,7 +480,7 @@ class VectorizeLoops(ScopedTransformer):
                 f"        raise TypeError('opast-vector: unsupported dtype')\n"
                 f"    return ({np_elt_src}).tolist()\n"
             )
-        bind_src = f"{base} = {self._helper}.vector_dispatch({base}_py, {base}_np)\n"
+        bind_src = f"{base} = _opast_vector_dispatch({base}_py, {base}_np)\n"
         for src in (py_src, np_src, bind_src):
             self._pending.extend(ast.parse(src).body)
 

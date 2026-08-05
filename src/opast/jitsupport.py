@@ -99,24 +99,6 @@ def _ensure_numba():
     return _numba
 
 
-_numpy = None
-_numpy_failed = False
-
-
-def _ensure_numpy():
-    """Import numpy on the first vectorized call (lazy for the same reason
-    as numba: cold code paths must not pay the import)."""
-    global _numpy, _numpy_failed
-    if _numpy is None and not _numpy_failed:
-        try:
-            import numpy  # type: ignore[import-not-found]
-
-            _numpy = numpy
-        except Exception:
-            _numpy_failed = True
-    return _numpy
-
-
 def numba_available() -> bool:
     """Cheap installedness probe for CLI warnings, without importing numba
     (the import itself stays deferred to the first compilation attempt).
@@ -198,13 +180,14 @@ def _results_match(expected, got) -> bool:
         return len(expected) == len(got) and all(
             _results_match(e, g) for e, g in zip(expected, got)
         )
-    if _numpy is not None and (
-        isinstance(expected, _numpy.ndarray) or isinstance(got, _numpy.ndarray)
+    np = sys.modules.get("numpy")  # loaded iff arrays can exist at all
+    if np is not None and (
+        isinstance(expected, np.ndarray) or isinstance(got, np.ndarray)
     ):
         try:  # exact (NaN-aware for float dtypes); ulp drift falls back
-            if _numpy.array_equal(expected, got):
+            if np.array_equal(expected, got):
                 return True
-            return bool(_numpy.array_equal(expected, got, equal_nan=True))
+            return bool(np.array_equal(expected, got, equal_nan=True))
         except Exception:  # equal_nan rejects integer dtypes, shape errors
             return False
     try:
@@ -216,64 +199,6 @@ def _results_match(expected, got) -> bool:
         return bool(expected == got)
     except Exception:
         return False
-
-
-#: Process-wide state per vectorized site: key -> "numpy" | "python".
-_vector_state: dict[tuple, str] = {}
-
-
-def vector_dispatch(python_func, numpy_func):
-    """Dispatcher for a vectorized loop (aggressive ``numpy``).
-
-    *python_func* is the exact original computation; *numpy_func* takes the
-    numpy module as its first argument and computes the same result with
-    array operations.  The first call runs both and compares
-    (:func:`_results_match`); any mismatch, any exception from the numpy
-    path, or numpy being unavailable permanently selects the Python path
-    for this site.  The numpy path runs under ``errstate(divide/invalid=
-    'raise')`` so a zero divisor or NaN-producing step becomes an exception
-    -- and therefore a fallback re-running the Python path, which then
-    raises (or succeeds) exactly as the original loop would.  Int64
-    wraparound raises nothing anywhere; it is the option's stated bet.
-    """
-    key = _func_key(python_func)
-
-    @functools.wraps(python_func)
-    def wrapper(*args):
-        state = _vector_state.get(key)
-        if state == "python":
-            return python_func(*args)
-        np_mod = _ensure_numpy()
-        if np_mod is None:
-            _vector_state[key] = "python"
-            return python_func(*args)
-        if state == "numpy":
-            try:
-                with np_mod.errstate(divide="raise", invalid="raise"):
-                    return numpy_func(np_mod, *args)
-            except Exception:
-                _vector_state[key] = "python"
-                return python_func(*args)
-        # First call: verify against the exact Python result.
-        expected = python_func(*args)
-        if not _VERIFY:
-            _vector_state[key] = "numpy"
-            return expected
-        try:
-            with np_mod.errstate(divide="raise", invalid="raise"):
-                got = numpy_func(np_mod, *args)
-        except Exception as exc:
-            _debug(f"vector path of {python_func.__name__} failed: {exc!r}")
-            _vector_state[key] = "python"
-            return expected
-        if _results_match(expected, got):
-            _vector_state[key] = "numpy"
-        else:
-            _debug(f"vector verification mismatch in {python_func.__name__}")
-            _vector_state[key] = "python"
-        return expected
-
-    return wrapper
 
 
 def compile_only(func):

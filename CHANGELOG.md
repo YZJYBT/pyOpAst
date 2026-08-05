@@ -2,7 +2,7 @@
 
 ## 未发布
 
-**新增激进选项 `numpy`(共 13 个)——numpy 向量化提取** — 不动点后的一次性 pass(`passes/vectorize.py`):推导式 map 与 `+=` 归约(迭代对象须为可证新鲜列表/元组或 `range(...)`,元素表达式为目标/不变量/数值常量上的算术)提取为生成的辅助函数对——逐字原样的 Python 版 + numpy 版——由 `jitsupport.vector_dispatch` 接管:首调双版对照校验;任何不匹配、异常、不支持 dtype(异构列表)或 numpy 缺席都使该点**永久回退**;numpy 路径在 `errstate(divide/invalid='raise')` 下运行,除零重抛与原代码一致的异常;结果经 `.tolist()`/`.item()` 返回保持精确 Python 标量类型;混合 int/float 提升风险由 dtype 门挡下(int 模式仅收 `kind=='i'`,元素表达式可证必产 float 时放宽)。**按实测定的激活规则**:range 形态全放行(归约 8.8–23.8x、map ~1.5x),列表形态要求元素 ≥4 个运算(~2–3x;2 运算实测 0.61–0.92x 故静态跳过)。
+**新增激进选项 `numpy`(共 13 个)——numpy 向量化提取** — 不动点后的一次性 pass(`passes/vectorize.py`):推导式 map 与 `+=` 归约(迭代对象须为可证新鲜列表/元组或 `range(...)`,元素表达式为目标/不变量/数值常量上的算术)提取为生成的辅助函数对——逐字原样的 Python 版 + numpy 版——由**内嵌进产物的自包含分发器**接管(产物保持零运行时依赖:不 import opast,numpy 严格可选;`-O3 --disable jit` 的零依赖构建契约不破):首调双版对照校验;任何不匹配、异常、不支持 dtype(异构列表)或 numpy 缺席都使该点**永久回退**;numpy 路径在 `errstate(divide/invalid='raise')` 下运行,除零重抛与原代码一致的异常;结果经 `.tolist()`/`.item()` 返回保持精确 Python 标量类型;混合 int/float 提升风险由 dtype 门挡下(int 模式仅收 `kind=='i'`,元素表达式可证必产 float 时放宽)。**按实测定的激活规则**:range 形态全放行(归约 8.8–23.8x、map ~1.5x),列表形态要求元素 ≥4 个运算(~2–3x;2 运算实测 0.61–0.92x 故静态跳过)。
 
 **jit numpy 支持** — 模块存在单绑定 `import numpy`(含别名)时:候选可调用白名单 `np.*`(sqrt/sum/dot/zeros/arange 等 22 个)、变量下标读取、对可证由 np 构造器创建的局部数组下标写入;外提循环同样受益(numpy 根保持全局引用)。首调校验的结果比较现已数组感知(`array_equal`,NaN 感知,ulp 漂移即回退)。
 
