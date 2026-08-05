@@ -87,9 +87,9 @@ def _opast_vec_match(_e, _g):
         return _e == _g or abs(_e - _g) <= 1e-12 * max(abs(_e), abs(_g), 1.0)
     return type(_e) is type(_g) and _e == _g
 
-def _opast_vector_dispatch(_py, _np_fn):
+def _opast_vector_dispatch(_py, _np_fn, _needs_check=True):
     _state = []
-    _verify = not __import__("os").environ.get("OPAST_JIT_NO_VERIFY")
+    _verify = _needs_check and not __import__("os").environ.get("OPAST_JIT_NO_VERIFY")
 
     def _call(*_args):
         if _state and _state[0] == "python":
@@ -106,10 +106,16 @@ def _opast_vector_dispatch(_py, _np_fn):
             except Exception:
                 _state[:] = ["python"]
                 return _py(*_args)
-        _expected = _py(*_args)
         if not _verify:
+            try:
+                with _np.errstate(divide="raise", invalid="raise"):
+                    _result = _np_fn(_np, *_args)
+            except Exception:
+                _state[:] = ["python"]
+                return _py(*_args)
             _state[:] = ["numpy"]
-            return _expected
+            return _result
+        _expected = _py(*_args)
         try:
             with _np.errstate(divide="raise", invalid="raise"):
                 _got = _np_fn(_np, *_args)
@@ -124,6 +130,109 @@ def _opast_vector_dispatch(_py, _np_fn):
 
 _VEC_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow)
 _VEC_UNARY = (ast.USub, ast.UAdd)
+
+
+#: Magnitude below which int64 arithmetic provably cannot wrap.
+_INT64_SAFE = 1 << 62
+
+_EXACT_FLOAT_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div)
+
+
+def _range_facts(args: list):
+    """``(value_bound, trip_count)`` for a constant-argument ``range(...)``,
+    else None."""
+    values = []
+    for a in args:
+        if isinstance(a, ast.Constant) and type(a.value) is int:
+            values.append(a.value)
+        elif (
+            isinstance(a, ast.UnaryOp)
+            and isinstance(a.op, ast.USub)
+            and isinstance(a.operand, ast.Constant)
+            and type(a.operand.value) is int
+        ):
+            values.append(-a.operand.value)
+        else:
+            return None
+    try:
+        span = range(*values)
+    except (TypeError, ValueError):
+        return None
+    if not len(span):
+        return (0, 0)
+    return (max(abs(span[0]), abs(span[-1])), len(span))
+
+
+def _magnitude(node: ast.AST, var: str, var_bound: int):
+    """Upper bound on ``|ELT|`` given ``|var| <= var_bound``, or None when
+    any operand is unbounded (an invariant name, a non-constant divisor)."""
+    if isinstance(node, ast.Constant):
+        return abs(node.value) if type(node.value) in (int, bool) else None
+    if isinstance(node, ast.Name):
+        return var_bound if node.id == var else None
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+        return _magnitude(node.operand, var, var_bound)
+    if not isinstance(node, ast.BinOp):
+        return None
+    left = _magnitude(node.left, var, var_bound)
+    if left is None:
+        return None
+    op = node.op
+    if isinstance(op, (ast.Add, ast.Sub, ast.Mult)):
+        right = _magnitude(node.right, var, var_bound)
+        if right is None:
+            return None
+        return left + right if not isinstance(op, ast.Mult) else left * right
+    const = (
+        node.right.value
+        if isinstance(node.right, ast.Constant)
+        and type(node.right.value) is int
+        else None
+    )
+    if isinstance(op, ast.Mod):
+        # Python and numpy int64 both floor-divide, so |a % c| < |c|.
+        return abs(const) if const else None
+    if isinstance(op, ast.FloorDiv):
+        return left if const else None
+    if isinstance(op, ast.Pow):
+        return left ** const if const is not None and 0 <= const <= 8 else None
+    return None
+
+
+def _exact_float_ops(node: ast.AST) -> bool:
+    """Only IEEE-exact operations: numpy float64 and CPython floats agree
+    bit for bit on ``+ - * /``, which ``**``/``//``/``%`` do not guarantee."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.BinOp) and not isinstance(n.op, _EXACT_FLOAT_OPS):
+            return False
+    return True
+
+
+def _provably_equal(elt, target: str, iter_kind, check: "_EltCheck",
+                    reduction: bool) -> bool:
+    """True when the numpy path cannot differ from the Python one, so the
+    first-call verification -- which costs a *second* full evaluation, the
+    whole runtime for a script that reaches the site once -- can be skipped.
+
+    Two proofs: fixed-width int64 arithmetic that provably cannot wrap
+    (constant range bounds, magnitudes bounded through the element
+    expression, times the trip count for a reduction), and element-wise
+    float maps built from IEEE-exact operations (a float *reduction* still
+    reassociates, so it keeps its verification).
+    """
+    if check.invariants or iter_kind[0] != "range":
+        return False  # unknown operand values
+    facts = _range_facts(iter_kind[1])
+    if facts is None:
+        return False
+    bound, trips = facts
+    if _forces_float(elt):
+        return not reduction and _exact_float_ops(elt)
+    magnitude = _magnitude(elt, target, bound)
+    if magnitude is None:
+        return False
+    total = magnitude * trips if reduction else magnitude
+    return total < _INT64_SAFE
 
 
 def _worth_it(iter_kind, check: "_EltCheck") -> bool:
@@ -480,7 +589,10 @@ class VectorizeLoops(ScopedTransformer):
                 f"        raise TypeError('opast-vector: unsupported dtype')\n"
                 f"    return ({np_elt_src}).tolist()\n"
             )
-        bind_src = f"{base} = _opast_vector_dispatch({base}_py, {base}_np)\n"
+        checked = not _provably_equal(elt, target, iter_kind, check, reduction)
+        bind_src = (
+            f"{base} = _opast_vector_dispatch({base}_py, {base}_np, {checked})\n"
+        )
         for src in (py_src, np_src, bind_src):
             self._pending.extend(ast.parse(src).body)
 
