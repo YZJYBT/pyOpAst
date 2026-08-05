@@ -34,10 +34,21 @@ plain Python plus observation until a runtime trigger (bound-argument
 size, single-call time, or call volume) proves the function hot, then the
 usual compile + verify + guarded-dispatch machinery takes over.  Loop
 bounds that name a positional parameter are passed to the decorator as
-argument indices, enabling the immediate size trigger.  Lazy candidates
-must be standalone -- functions participating in peer calls are excluded,
-because the raw-dispatcher aliases (``_opast_njit_G``) resolve at
-decoration time, which a lazily-compiled callee cannot honour.
+argument indices, enabling the immediate size trigger.  A lazy candidate
+with peer calls compiles from a ``_opast_jitsrc`` copy whose calls target
+raw-dispatcher aliases; the aliases are *backfilled at trigger time*
+(already-compiled peers resolve via ``compiled_of``, not-yet-compiled
+ones -- lazy wrappers and plain undecorated candidates alike -- are
+compiled on the spot; any peer that cannot compile makes the caller
+permanently Python).
+
+Argument-mutating candidates (a subscript store on an annotated array
+parameter, or such a parameter passed on to a peer) compile with
+``verify=False``: the first-call comparison re-runs the function on the
+same arguments, which is only sound for argument-pure code -- verifying
+an in-place partition would re-partition around a different pivot and
+hand the caller stale boundaries.  They rely on the whitelist and
+numba's typing alone.
 
 njit inter-calls
 ----------------
@@ -123,16 +134,29 @@ _ALLOWED_CALLS = frozenset(
 #: numpy functions numba's nopython mode supports well; attribute access on
 #: the proven numpy root is limited to these (Load), calls included.
 _NP_FUNCS = frozenset({
-    "abs", "arange", "array", "asarray", "ceil", "cos", "dot", "empty",
-    "exp", "floor", "full", "log", "maximum", "mean", "minimum", "ones",
-    "prod", "sin", "sqrt", "sum", "tan", "zeros",
+    "abs", "arange", "array", "asarray", "ceil", "copy", "cos", "dot",
+    "empty", "empty_like", "exp", "floor", "full", "full_like", "log",
+    "maximum", "mean", "minimum", "ones", "ones_like", "prod", "sin",
+    "sqrt", "sum", "tan", "zeros", "zeros_like",
 })
 
 #: The subset that provably yields an ndarray -- locals bound once from one
 #: of these calls may be subscript-stored (``buf[i] = x``).
-_NP_CTORS = frozenset(
-    {"arange", "array", "asarray", "empty", "full", "ones", "zeros"}
-)
+_NP_CTORS = frozenset({
+    "arange", "array", "asarray", "copy", "empty", "empty_like", "full",
+    "full_like", "ones", "ones_like", "zeros", "zeros_like",
+})
+
+#: Array attributes numba types natively (reads only).
+_ARRAY_ATTRS = frozenset({"size", "shape", "ndim"})
+
+#: Builtin exceptions a candidate may ``raise`` with constant arguments
+#: (numba lowers those; dynamic messages like f-strings do not type).
+_EXC_NAMES = frozenset({
+    "ArithmeticError", "AssertionError", "Exception", "IndexError",
+    "KeyError", "LookupError", "NotImplementedError", "OverflowError",
+    "RuntimeError", "TypeError", "ValueError", "ZeroDivisionError",
+})
 
 _ALLOWED_STMTS = (
     ast.Return,
@@ -144,6 +168,7 @@ _ALLOWED_STMTS = (
     ast.Break,
     ast.Continue,
     ast.Pass,
+    ast.Raise,  # constant-argument builtin exceptions only (checked below)
 )
 
 _ALLOWED_EXPRS = (
@@ -158,6 +183,7 @@ _ALLOWED_EXPRS = (
     ast.Constant,
     ast.Attribute,
     ast.Subscript,
+    ast.Slice,  # basic array slicing; gated with subscripts below
 )
 
 
@@ -232,6 +258,129 @@ def _local_names(func: ast.FunctionDef) -> set[str]:
     return names
 
 
+class _ArrayAnnCtx:
+    """What an ndarray *annotation* looks like in this module: ``np.ndarray``
+    on the proven numpy root, ``npt.NDArray[...]`` on a single-binding
+    ``import numpy.typing as npt``, names imported directly from
+    numpy/numpy.typing, and single-binding module-level aliases thereof
+    (``NumericArray = npt.NDArray[np.number]``, ``TypeAlias`` included).
+    Only consulted under the aggressive ``annotations`` option -- trusting
+    the annotation to reflect the runtime type is exactly that bet."""
+
+    def __init__(self, tree: ast.Module, np_root: str | None,
+                 module_counts) -> None:
+        self.np_root = np_root
+        self.npt_root = None
+        self.direct: set[str] = set()
+        for s in tree.body:
+            if isinstance(s, ast.Import):
+                for a in s.names:
+                    if (
+                        a.name == "numpy.typing"
+                        and a.asname
+                        and module_counts.get(a.asname, 0) == 1
+                    ):
+                        self.npt_root = a.asname
+            elif isinstance(s, ast.ImportFrom) and s.module in (
+                "numpy", "numpy.typing"
+            ):
+                for a in s.names:
+                    if a.name in ("NDArray", "ndarray"):
+                        bound = a.asname or a.name
+                        if module_counts.get(bound, 0) == 1:
+                            self.direct.add(bound)
+        self.aliases: set[str] = set()
+        changed = True
+        while changed:  # aliases may reference earlier aliases
+            changed = False
+            for s in tree.body:
+                target = value = None
+                if (
+                    isinstance(s, ast.Assign)
+                    and len(s.targets) == 1
+                    and isinstance(s.targets[0], ast.Name)
+                ):
+                    target, value = s.targets[0].id, s.value
+                elif isinstance(s, ast.AnnAssign) and isinstance(
+                    s.target, ast.Name
+                ) and s.value is not None:
+                    target, value = s.target.id, s.value
+                if (
+                    target is not None
+                    and target not in self.aliases
+                    and module_counts.get(target, 0) == 1
+                    and self.matches(value)
+                ):
+                    self.aliases.add(target)
+                    changed = True
+
+    def matches(self, node: ast.AST) -> bool:
+        if isinstance(node, ast.Subscript):
+            return self.matches(node.value)
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == self.np_root and node.attr == "ndarray":
+                return True
+            return node.value.id == self.npt_root and node.attr == "NDArray"
+        if isinstance(node, ast.Name):
+            return node.id in self.direct or node.id in self.aliases
+        return False
+
+
+def _annotated_array_params(
+    func: ast.FunctionDef, ctx: "_ArrayAnnCtx | None"
+) -> frozenset[str]:
+    """Parameters annotated as ndarrays and never re-bound inside the
+    function (a re-bound name could hold anything by store time)."""
+    if ctx is None:
+        return frozenset()
+    rebound = {
+        n.id
+        for n in ast.walk(func)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del))
+    }
+    out: set[str] = set()
+    for a in [*func.args.posonlyargs, *func.args.args]:
+        if (
+            a.annotation is not None
+            and a.arg not in rebound
+            and ctx.matches(a.annotation)
+        ):
+            out.add(a.arg)
+    return frozenset(out)
+
+
+def _mutates_annotated_params(
+    func: ast.FunctionDef, ctx: "_ArrayAnnCtx | None",
+    peers: frozenset[str] = frozenset(),
+) -> bool:
+    """True when *func* visibly mutates caller-owned arrays: a subscript
+    store on an annotated array parameter, or such a parameter passed on to
+    a peer (which may mutate it in turn).  First-call verification re-runs
+    the function on the same arguments and is only sound for argument-pure
+    functions, so these candidates compile unverified."""
+    arrays = _annotated_array_params(func, ctx)
+    if not arrays:
+        return False
+    for n in ast.walk(func):
+        if (
+            isinstance(n, ast.Subscript)
+            and isinstance(n.ctx, (ast.Store, ast.Del))
+            and isinstance(n.value, ast.Name)
+            and n.value.id in arrays
+        ):
+            return True
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Name)
+            and n.func.id in peers
+            and any(
+                isinstance(a, ast.Name) and a.id in arrays for a in n.args
+            )
+        ):
+            return True
+    return False
+
+
 def _np_locals(func: ast.FunctionDef, np_root: str) -> frozenset[str]:
     """Locals bound exactly once, from a ``np.<ctor>(...)`` call: provably
     ndarrays, so subscript stores on them are in-bounds-checked array
@@ -265,6 +414,7 @@ def _numba_compatible(
     peers: frozenset[str] = frozenset(),
     consts: frozenset[str] = frozenset(),
     np_root: str | None = None,
+    ann_ctx: "_ArrayAnnCtx | None" = None,
 ) -> bool:
     """*peers* are other jit candidates that may be called (call position
     only -- a bare load of a peer would hand numba the fallback wrapper,
@@ -293,6 +443,9 @@ def _numba_compatible(
         np_arrays = _np_locals(func, np_root)
     else:
         np_root = None  # a local shadowing the alias disables numpy trust
+    # Aggressive ``annotations``: NDArray-annotated, never-rebound
+    # parameters count as proven arrays (stores, .size/.shape, slices).
+    np_arrays = np_arrays | _annotated_array_params(func, ann_ctx)
 
     body = list(func.body)
     if (
@@ -338,6 +491,32 @@ def _numba_compatible(
             elif isinstance(node, ast.While):
                 if node.orelse:
                     return False
+            elif isinstance(node, ast.Raise):
+                # Constant-argument builtin exceptions lower fine in numba;
+                # anything dynamic (f-strings, custom classes) does not.
+                exc = node.exc
+                if node.cause is not None or exc is None:
+                    return False
+                if isinstance(exc, ast.Name):
+                    if not (exc.id in _EXC_NAMES and exc.id not in own_names):
+                        return False
+                elif (
+                    isinstance(exc, ast.Call)
+                    and isinstance(exc.func, ast.Name)
+                    and exc.func.id in _EXC_NAMES
+                    and exc.func.id not in own_names
+                    and not exc.keywords
+                    and all(
+                        isinstance(a, ast.Constant)
+                        and type(a.value) in (str, int, float, bool)
+                        for a in exc.args
+                    )
+                ):
+                    pass
+                else:
+                    return False
+                continue  # validated whole; the str constants must not
+                # reach the generic Constant check
         elif isinstance(node, ast.expr):
             if not isinstance(node, _ALLOWED_EXPRS):
                 return False
@@ -363,7 +542,13 @@ def _numba_compatible(
                     and node.attr in _NP_FUNCS
                     and isinstance(node.ctx, ast.Load)
                 )
-                if not (math_attr or np_attr):
+                array_attr = (
+                    isinstance(node.value, ast.Name)
+                    and node.value.id in np_arrays
+                    and node.attr in _ARRAY_ATTRS
+                    and isinstance(node.ctx, ast.Load)
+                )
+                if not (math_attr or np_attr or array_attr):
                     return False
             elif isinstance(node, ast.Subscript):
                 # Reads: constant index always (tuple element access via
@@ -372,7 +557,11 @@ def _numba_compatible(
                 # else fails to compile and falls back).  Stores: proven
                 # ndarray locals only.
                 if isinstance(node.ctx, ast.Load):
-                    if not (np_root is not None or _const_int_index(node.slice)):
+                    if not (
+                        np_root is not None
+                        or np_arrays
+                        or _const_int_index(node.slice)
+                    ):
                         return False
                 elif not (
                     isinstance(node.value, ast.Name)
@@ -910,6 +1099,12 @@ class JitInjection:
                         if module_counts.get(root, 0) == 1:
                             np_root = root
 
+        ann_ctx = (
+            _ArrayAnnCtx(tree, np_root, module_counts)
+            if "annotations" in self.aggressive
+            else None
+        )
+
         helper = _HELPER_NAME
         taken = all_bound_names(tree) | {
             n.id for n in ast.walk(tree) if isinstance(n, ast.Name)
@@ -939,7 +1134,8 @@ class JitInjection:
                 name: fn
                 for name, fn in candidates.items()
                 if _numba_compatible(
-                    fn, math_ok, peers=peer_names, consts=consts, np_root=np_root
+                    fn, math_ok, peers=peer_names, consts=consts,
+                    np_root=np_root, ann_ctx=ann_ctx,
                 )
             }
             calls = {
@@ -963,13 +1159,14 @@ class JitInjection:
             work.extend(calls[name])
         selected = [candidates[name] for name in selected_names]
 
-        # Latent-hot leftovers: whitelisted, standalone (no peer calls --
-        # peer aliases resolve at decoration time, incompatible with an
-        # unknown compile time), with a loop whose trip count only runtime
-        # knows.  They observe first and compile on a runtime trigger.
+        # Latent-hot leftovers: whitelisted, with a loop whose trip count
+        # only runtime knows.  They observe first and compile on a runtime
+        # trigger.  Peer calls are allowed: the caller compiles from a
+        # jitsrc copy whose aliases are backfilled at trigger time (see
+        # jitsupport.maybe_njit_lazy).
         lazy: dict[str, tuple[int, ...]] = {}
         for name, fn in candidates.items():
-            if name in selected_names or calls[name]:
+            if name in selected_names:
                 continue
             latent, bounds = _lazy_bound_args(fn)
             if latent:
@@ -984,6 +1181,8 @@ class JitInjection:
         called_by_peer: set[str] = set()
         for name in selected_names:
             called_by_peer |= calls[name]
+        for name in lazy:
+            called_by_peer |= calls[name]
         njit_names: dict[str, str] = {}
         for name in sorted(called_by_peer):
             alias = f"_opast_njit_{name}"
@@ -992,7 +1191,9 @@ class JitInjection:
             taken.add(alias)
             njit_names[name] = alias
 
-        def _helper_call(attr: str, *call_args: ast.expr) -> ast.Call:
+        def _helper_call(
+            attr: str, *call_args: ast.expr, keywords: tuple = ()
+        ) -> ast.Call:
             return ast.Call(
                 func=ast.Attribute(
                     value=ast.Name(id=helper, ctx=ast.Load()),
@@ -1000,13 +1201,59 @@ class JitInjection:
                     ctx=ast.Load(),
                 ),
                 args=list(call_args),
-                keywords=[],
+                keywords=list(keywords),
+            )
+
+        def _no_verify_kw() -> ast.keyword:
+            return ast.keyword(arg="verify", value=ast.Constant(False))
+
+        def _mutating(name: str) -> bool:
+            return _mutates_annotated_params(
+                candidates[name], ann_ctx, peers=frozenset(calls.get(name, ()))
             )
 
         new_body: list[ast.stmt] = []
         for stmt in tree.body:
             new_body.append(stmt)
             if isinstance(stmt, ast.FunctionDef) and stmt.name in lazy:
+                keywords = []
+                if calls[stmt.name]:
+                    src = copy.deepcopy(stmt)
+                    src_name = f"_opast_jitsrc_{stmt.name}"
+                    while src_name in taken:
+                        src_name += "_"
+                    taken.add(src_name)
+                    src.name = src_name
+                    _PeerCallRewriter(
+                        {g: njit_names[g] for g in calls[stmt.name]}
+                    ).visit(src)
+                    # The copy must be defined before the decorator call
+                    # that references it evaluates.
+                    new_body.insert(len(new_body) - 1, src)
+                    keywords = [
+                        ast.keyword(
+                            arg="source",
+                            value=ast.Name(id=src_name, ctx=ast.Load()),
+                        ),
+                        ast.keyword(
+                            arg="peers",
+                            value=ast.Tuple(
+                                elts=[
+                                    ast.Tuple(
+                                        elts=[
+                                            ast.Constant(g),
+                                            ast.Constant(njit_names[g]),
+                                        ],
+                                        ctx=ast.Load(),
+                                    )
+                                    for g in sorted(calls[stmt.name])
+                                ],
+                                ctx=ast.Load(),
+                            ),
+                        ),
+                    ]
+                if _mutating(stmt.name):
+                    keywords.append(_no_verify_kw())
                 decorator = ast.Call(
                     func=ast.Attribute(
                         value=ast.Name(id=helper, ctx=ast.Load()),
@@ -1021,7 +1268,7 @@ class JitInjection:
                             ctx=ast.Load(),
                         )
                     ],
-                    keywords=[],
+                    keywords=keywords,
                 )
                 stmt.decorator_list = [ast.copy_location(decorator, stmt)]
                 self.changes += 1
@@ -1055,6 +1302,11 @@ class JitInjection:
                                 ast.Name(id=src_name, ctx=ast.Load()),
                             ),
                             ast.Name(id=func.name, ctx=ast.Load()),
+                            keywords=(
+                                (_no_verify_kw(),)
+                                if _mutating(func.name)
+                                else ()
+                            ),
                         ),
                     )
                 )
@@ -1064,6 +1316,10 @@ class JitInjection:
                     attr="maybe_njit",
                     ctx=ast.Load(),
                 )
+                if _mutating(func.name):
+                    decorator = ast.Call(
+                        func=decorator, args=[], keywords=[_no_verify_kw()]
+                    )
                 func.decorator_list = [ast.copy_location(decorator, func)]
             if func.name in njit_names:
                 # Raw dispatcher alias for compiled callers (None when the

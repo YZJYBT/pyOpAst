@@ -225,11 +225,15 @@ def compile_only(func):
     return compiled
 
 
-def dispatch(compiled, python_func):
+def dispatch(compiled, python_func, verify=True):
     """Wrapper calling *compiled* and, on any numba/infra error or a
     first-call verification mismatch, permanently falling back to
     *python_func*.  With *compiled* None the original function is returned
-    unchanged."""
+    unchanged.  *verify=False* skips the first-call comparison: running
+    Python and compiled on the *same* arguments is only sound for
+    argument-pure functions, so candidates that store into annotated array
+    parameters must not be double-run (re-partitioning an already
+    partitioned array returns different, stale boundaries)."""
     if compiled is None:
         return python_func
 
@@ -243,7 +247,7 @@ def dispatch(compiled, python_func):
         nonlocal use_python
         if use_python or state[0] is None:
             return python_func(*args, **kwargs)
-        if _VERIFY and not state[1]:
+        if _VERIFY and verify and not state[1]:
             expected = python_func(*args, **kwargs)
             try:
                 got = compiled(*args, **kwargs)
@@ -287,42 +291,75 @@ def compiled_of(wrapper):
     return getattr(wrapper, "opast_compiled", None)
 
 
-def maybe_njit(func):
+def maybe_njit(func=None, *, verify=True):
     """Compile *func* with ``numba.njit`` if possible; otherwise (or on any
-    later numba failure / verification mismatch) run the original function."""
-    return dispatch(compile_only(func), func)
+    later numba failure / verification mismatch) run the original function.
+    Usable bare (``@maybe_njit``) or called (``@maybe_njit(verify=False)``
+    for argument-mutating candidates -- see :func:`dispatch`)."""
+    if func is None:
+        return lambda f: dispatch(compile_only(f), f, verify=verify)
+    return dispatch(compile_only(func), func, verify=verify)
 
 
-def maybe_njit_lazy(bound_args=()):
+def maybe_njit_lazy(bound_args=(), source=None, peers=(), verify=True):
     """Decorator factory for latent-hot candidates: observe, then compile
     once a trigger fires (see module docstring).  *bound_args* holds the
     positional indices of parameters known to feed a loop bound; an empty
-    tuple leaves only the time/volume triggers."""
+    tuple leaves only the time/volume triggers.
+
+    A lazy candidate that calls other candidates gets *source* (the
+    ``_opast_jitsrc`` copy whose peer calls target raw-dispatcher aliases)
+    and *peers* (``(global_name, alias_name)`` pairs).  At trigger time the
+    aliases are backfilled first: each peer resolves through
+    :func:`compiled_of` (already-compiled wrappers), else its underlying
+    function is compiled on the spot (``__wrapped__`` of a not-yet-
+    triggered lazy wrapper, or a plain undecorated candidate).  Any peer
+    that cannot compile makes this site permanently Python."""
     indices = tuple(bound_args)
 
     def decorate(python_func):
         if os.environ.get("OPAST_DISABLE_JIT"):
             return python_func
-        key = _func_key(python_func)
+        target = source if source is not None else python_func
+        key = _func_key(target)
         entry = _registry.get(key)
         if entry is not None:
             # A previous exec of this module already decided: adopt the
             # compiled function (verified state carries over) or stay Python.
             if entry[0] is None:
                 return python_func
-            return dispatch(entry[0], python_func)
+            return dispatch(entry[0], python_func, verify=verify)
         obs = _observations.setdefault(key, [0, 0.0])
         delegate = None
+
+        def _backfill_aliases() -> bool:
+            module_globals = python_func.__globals__
+            for peer_name, alias in peers:
+                peer = module_globals.get(peer_name)
+                raw = compiled_of(peer) if peer is not None else None
+                if raw is None and peer is not None:
+                    raw = compile_only(getattr(peer, "__wrapped__", peer))
+                if raw is None:
+                    return False
+                module_globals[alias] = raw
+            return True
 
         def _adopt(args, kwargs, expected, reason):
             """Compile now; the triggering call's Python result serves as
             the verification expectation on the very same arguments."""
             _debug(f"{python_func.__name__}: lazy trigger ({reason})")
-            compiled = compile_only(python_func)
+            if peers and not _backfill_aliases():
+                _debug(
+                    f"{python_func.__name__}: a peer failed to compile -- "
+                    f"permanent Python"
+                )
+                _registry[key] = [None, False]
+                return python_func
+            compiled = compile_only(target)
             if compiled is None:
                 return python_func
             state = _registry[key]
-            if _VERIFY and not state[1]:
+            if _VERIFY and verify and not state[1]:
                 try:
                     got = compiled(*args, **kwargs)
                 except Exception as exc:
@@ -343,7 +380,7 @@ def maybe_njit_lazy(bound_args=()):
                     return python_func
                 state[1] = True
             _opast_lazy_dispatcher.opast_compiled = compiled
-            return dispatch(compiled, python_func)
+            return dispatch(compiled, python_func, verify=verify)
 
         @functools.wraps(python_func)
         def _opast_lazy_dispatcher(*args, **kwargs):

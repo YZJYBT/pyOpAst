@@ -159,7 +159,9 @@ class GlobalLocalization(ScopedTransformer):
 
         # Under --jit, the whitelist roots (``math``, a single-binding numpy
         # import alias) must stay global references: a localized alias would
-        # evict otherwise-eligible candidates from numba's typing.
+        # evict otherwise-eligible candidates from numba's typing.  The same
+        # goes for module-level function names: ``_x = peer`` inside a
+        # caller hides the peer call from the jit pass's candidate fixpoint.
         self._jit_roots: set[str] = set()
         if self.jit_mode:
             for stmt in tree.body:
@@ -169,6 +171,8 @@ class GlobalLocalization(ScopedTransformer):
                             root = alias.asname or alias.name
                             if counts.get(root, 0) == 1:
                                 self._jit_roots.add(root)
+                elif isinstance(stmt, ast.FunctionDef):
+                    self._jit_roots.add(stmt.name)
 
         self._counter = 0
         for n in ast.walk(tree):

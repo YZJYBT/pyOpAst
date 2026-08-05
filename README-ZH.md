@@ -262,7 +262,7 @@ opast --jit hot_script.py
 流水线收敛后运行一次性 `jit` pass:对**未被内联**的模块级函数,若同时满足——
 
 - **热点启发**:含嵌套循环,或某循环迭代次数可静态估算 ≥ 10000(`range(常量)` / `while name < 常量`);
-- **numba 白名单**:仅数值常量与 int/float 算术、元组(打包/解包/多返回值/常量下标读取——numba 的 static_getitem 对异构元组也能类型化)、`if`/`while`/`for range()`/`return`、调用仅限 `range/abs/min/max/round/divmod/int/float/bool/len`、`math.*` 与**其他白名单候选函数**(见下)、名字仅限参数、局部变量与**可证单绑定的数值/元组模块常量**(numba 把全局冻结为编译期值,单绑定证明让冻结精确无误);模块存在单绑定的 `import numpy` 时,候选还可调用白名单内的 `np.*` 函数、做变量下标读取、并对可证由 `np.zeros`/`ones`/`empty`/`full`/`arange` 创建的局部数组做下标写入——数组型内核整函数可编译;无字符串、无 list/dict/set(反射容器每次调用整表复制且已弃用)、无属性(math/numpy 根除外)/闭包/try/yield;
+- **numba 白名单**:仅数值常量与 int/float 算术、元组(打包/解包/多返回值/常量下标读取——numba 的 static_getitem 对异构元组也能类型化)、`if`/`while`/`for range()`/`return`、调用仅限 `range/abs/min/max/round/divmod/int/float/bool/len`、`math.*` 与**其他白名单候选函数**(见下)、名字仅限参数、局部变量与**可证单绑定的数值/元组模块常量**(numba 把全局冻结为编译期值,单绑定证明让冻结精确无误);模块存在单绑定的 `import numpy` 时,候选还可调用白名单内的 `np.*` 函数、做变量下标与切片读取、读 `.size`/`.shape`/`.ndim`、`raise` 常量消息的内建异常、并对可证由 `np.zeros`/`ones`/`empty_like` 等创建的局部数组做下标写入——数组型内核整函数可编译;开启激进 `annotations` 时,标注为 `np.ndarray`/`npt.NDArray`(含模块级别名)的参数同样视为已证数组,就地算法(排序、划分)由此解锁——此类**变异实参**的候选跳过首调对照(对同一参数重跑就地函数本身不健全),只依赖白名单与 numba 类型检查;lazy 候选现可互调:同伴别名在触发时回填,变量边界的归并内核连同 `_gallop_*` 辅助函数整体编译(200k 元素排序基准实测:归并稳态 5.3x、三路快排 17.8x);无字符串、无 list/dict/set(反射容器每次调用整表复制且已弃用)、无属性(math/numpy 根除外)/闭包/try/yield;
 - 模块无动态构造、函数名只绑定一次且未被 `global` 声明——
 
 则加上 `@_opast_jit.maybe_njit` 装饰(注入 `import opast.jitsupport`)。

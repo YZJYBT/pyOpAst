@@ -464,6 +464,9 @@ def optimize_ast(
         from .passes.jit import JitInjection
 
         jit_pass = JitInjection()
+        # The jit whitelist consults the ``annotations`` bet (NDArray-
+        # annotated parameters count as proven arrays).
+        jit_pass.aggressive = aggressive & frozenset({"annotations"})
         tree = jit_pass.run(tree)
         report.record(jit_pass)
         ast.fix_missing_locations(tree)

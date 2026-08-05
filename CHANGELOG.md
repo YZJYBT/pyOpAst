@@ -6,6 +6,8 @@
 
 **jit numpy 支持** — 模块存在单绑定 `import numpy`(含别名)时:候选可调用白名单 `np.*`(sqrt/sum/dot/zeros/arange 等 22 个)、变量下标读取、对可证由 np 构造器创建的局部数组下标写入;外提循环同样受益(numpy 根保持全局引用)。首调校验的结果比较现已数组感知(`array_equal`,NaN 感知,ulp 漂移即回退)。
 
+**jit 白名单 v2:就地数组算法**——四项放宽 + 一项工程:① 激进 `annotations` 下,标注 `np.ndarray`/`npt.NDArray`(含模块级 TypeAlias 别名、`import numpy.typing as npt` 与 `from numpy.typing import NDArray` 两种形态)且从不重绑的参数视为已证数组:解锁参数下标写、`.size`/`.shape`/`.ndim`、切片读写——排序/划分类就地算法整函数进 njit;② `ast.Slice` 入表达式白名单;③ `np.empty_like`/`zeros_like`/`ones_like`/`full_like`/`copy` 入函数与构造器清单,`raise` 常量实参内建异常入语句白名单;④ localize 在 jit 模式下不再别名化模块级函数名(别名会让候选不动点看不见同伴调用);⑤ **lazy 候选互调**:带同伴调用的 lazy 候选从 `_opast_jitsrc` 副本编译,别名在触发时回填(已编译同伴走 `compiled_of`,未编译的——lazy 包装或普通未装饰候选——当场编译;任一同伴编不出则该点永久 Python)。**健全性修正(自测抓到)**:变异实参的候选(注解数组参数被下标写、或传给同伴)以 `verify=False` 编译——首调对照会对同一参数重跑函数,对就地划分意味着二次划分用不同 pivot、调用方拿到过期边界,重跑本身不健全。实测(200k 元素排序基准,真实 numba):galloping 归并稳态 **5.3x**、三路快排 **17.8x**,快排首跑含编译费已 4.4x。
+
 **默认层扩展**:`fresh_container_names` 的使用白名单补上推导式迭代位(`[x for x in xs]` 与 `for` 语句同为只读迭代)——LICM/CSE 的 len 证明与向量化的新鲜性证明共同受益。
 
 **修复**:localize 在 jit 模式下会把 `math`/numpy 导入根局部化,踢掉本可编译的候选——白名单根现保持全局引用。
