@@ -19,10 +19,14 @@ class Area:
     name: str
     failures: list[str] = field(default_factory=list)
     repros: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
 
     def fail(self, msg: str, *commands: str) -> None:
         self.failures.append(msg)
         self.repros.extend(commands)
+
+    def note(self, msg: str) -> None:
+        self.notes.append(msg)
 
 
 def env() -> dict[str, str]:
@@ -89,8 +93,23 @@ def show(path: Path, *extra: str) -> subprocess.CompletedProcess[str]:
     return run([PYTHON, "-m", "opast", "--show", "--no-run", *extra, str(path)])
 
 
+def target_numba_available() -> bool:
+    probe = run([
+        PYTHON,
+        "-c",
+        "import opast.jitsupport as j; print(j.numba_available())",
+    ])
+    return probe.returncode == 0 and probe.stdout.strip() == "True"
+
+
 def verify_jit() -> Area:
     area = Area("jit")
+    numba_available = target_numba_available()
+    if not numba_available:
+        area.note(
+            "skipped: numba unavailable in target interpreter; compile-only "
+            "assertions are skipped"
+        )
 
     hot = write_case(
         "jit_hot_numeric",
@@ -128,9 +147,8 @@ def verify_jit() -> Area:
     if report.returncode != 0 or "jit:" not in report.stderr:
         area.fail("--jit --report did not include jit pass stats", command_text([PYTHON, "-m", "opast", "--jit", "--report", "--no-run", str(hot)]))
 
-    fallback = write_case(
-        "jit_runtime_fallback",
-        """
+    numba_literal = "True" if numba_available else "False"
+    fallback_source = """
         def hot(n, x):
             total = 0
             for i in range(12000):
@@ -139,19 +157,19 @@ def verify_jit() -> Area:
 
         print(hot(12000, 7))
         print(hot(12000, "ab"))
-        print(getattr(hot, "opast_compiled", None) is not None)
-        """,
-    )
+        if __NUMBA_EXPECTED__:
+            print(getattr(hot, "opast_compiled", None) is not None)
+        """.replace("__NUMBA_EXPECTED__", numba_literal)
+    fallback = write_case("jit_runtime_fallback", fallback_source)
     jit_fb = run([PYTHON, "-m", "opast", "--jit", str(fallback)])
-    if jit_fb.returncode != 0 or jit_fb.stdout != "14\nabab\nTrue\n":
+    expected_fb = "14\nabab\nTrue\n" if numba_available else "14\nabab\n"
+    if jit_fb.returncode != 0 or jit_fb.stdout != expected_fb:
         area.fail(
             f"JIT runtime fallback failed: rc={jit_fb.returncode} stdout={jit_fb.stdout!r} stderr={jit_fb.stderr!r}",
             command_text([PYTHON, "-m", "opast", "--jit", str(fallback)]),
         )
 
-    materialized = write_case(
-        "jit_materialized_source",
-        """
+    materialized_source = """
         import pathlib
         import sys
 
@@ -163,12 +181,14 @@ def verify_jit() -> Area:
 
         print(hot(12000))
         print(pathlib.Path(__file__).resolve() == pathlib.Path(sys.argv[0]).resolve())
-        print("opast-jit" in pathlib.Path(hot.__wrapped__.__code__.co_filename).parts)
-        print(pathlib.Path(hot.__wrapped__.__code__.co_filename).exists())
-        """,
-    )
+        if __NUMBA_EXPECTED__:
+            print("opast-jit" in pathlib.Path(hot.__wrapped__.__code__.co_filename).parts)
+            print(pathlib.Path(hot.__wrapped__.__code__.co_filename).exists())
+        """.replace("__NUMBA_EXPECTED__", numba_literal)
+    materialized = write_case("jit_materialized_source", materialized_source)
     mat = run([PYTHON, "-m", "opast", "--jit", str(materialized)])
-    if mat.returncode != 0 or mat.stdout.splitlines()[-3:] != ["True", "True", "True"]:
+    expected_mat_tail = ["True", "True", "True"] if numba_available else ["True"]
+    if mat.returncode != 0 or mat.stdout.splitlines()[-len(expected_mat_tail):] != expected_mat_tail:
         area.fail(
             f"JIT source materialization/__file__ check failed: rc={mat.returncode} stdout={mat.stdout!r} stderr={mat.stderr!r}",
             command_text([PYTHON, "-m", "opast", "--jit", str(materialized)]),
@@ -2855,6 +2875,8 @@ def main() -> int:
         print(f"{status}: {area.name}")
         for failure in area.failures:
             print(f"  - {failure}")
+        for note in area.notes:
+            print(f"  - {note}")
         for repro in dict.fromkeys(area.repros):
             print(f"    repro: {repro}")
         failed = failed or bool(area.failures)
