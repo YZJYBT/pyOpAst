@@ -169,6 +169,8 @@ _ALLOWED_STMTS = (
     ast.Continue,
     ast.Pass,
     ast.Raise,  # constant-argument builtin exceptions only (checked below)
+    ast.Expr,  # only a DynArray growth call (checked below); a bare call to
+    # anything else would be an effect the whitelist does not model
 )
 
 _ALLOWED_EXPRS = (
@@ -349,6 +351,261 @@ def _annotated_array_params(
     return frozenset(out)
 
 
+#: Growth methods only the dynamic form may use.
+_DYN_METHODS = frozenset({"append", "pop"})
+
+
+def dynarray_root(tree: ast.Module, module_counts) -> str | None:
+    """The single-binding name ``opast.DynArray`` is imported under, if any."""
+    for s in tree.body:
+        if isinstance(s, ast.ImportFrom) and s.module in (
+            "opast", "opast.containers"
+        ):
+            for a in s.names:
+                if a.name == "DynArray":
+                    bound = a.asname or "DynArray"
+                    if module_counts.get(bound, 0) == 1:
+                        return bound
+    return None
+
+
+def _dyn_ctor_kind(node: ast.AST, dyn_name: str) -> str | None:
+    """``"dynamic"`` for ``DynArray()``, ``"fixed"`` for
+    ``DynArray.zeros(...)``/``.full(...)``, else None."""
+    if not isinstance(node, ast.Call):
+        return None
+    func = node.func
+    if isinstance(func, ast.Name) and func.id == dyn_name:
+        if not node.args and not node.keywords:
+            return "dynamic"
+        return None
+    if (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and func.value.id == dyn_name
+        and func.attr in ("zeros", "full")
+    ):
+        return "fixed"
+    return None
+
+
+def dyn_locals(func: ast.FunctionDef, dyn_name: str):
+    """``(kinds, ok)``: locals bound exactly once to a ``DynArray`` factory,
+    mapped to ``"dynamic"``/``"fixed"``.
+
+    *ok* is False when the function touches ``DynArray`` in any way this
+    pass does not model -- an unrecognised factory call, a container that
+    escapes (returned, passed on, aliased, stored into something else), or
+    a growth method on a fixed-capacity buffer.  A rejected function is not
+    a jit candidate at all: its compiled copy would have to keep calling
+    ``DynArray``, which numba cannot type anyway.
+    """
+    counts: Counter[str] = Counter()
+    for n in ast.walk(func):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            counts[n.id] += 1
+        elif isinstance(n, ast.arg):
+            counts[n.arg] += 1
+
+    kinds: dict[str, str] = {}
+    ctor_ids: set[int] = set()
+    for n in ast.walk(func):
+        if not (
+            isinstance(n, ast.Assign)
+            and len(n.targets) == 1
+            and isinstance(n.targets[0], ast.Name)
+        ):
+            continue
+        kind = _dyn_ctor_kind(n.value, dyn_name)
+        if kind is None:
+            continue
+        name = n.targets[0].id
+        if counts[name] != 1:
+            return {}, False  # rebound: the later value is unknown
+        kinds[name] = kind
+        ctor_ids.add(id(n.value))
+
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(func):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    for n in ast.walk(func):
+        if not (isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)):
+            continue
+        if n.id == dyn_name:
+            # The factory name itself may only appear inside a recognised
+            # constructor call bound to a trusted local.
+            parent = parents.get(id(n))
+            call = parent if isinstance(parent, ast.Call) else parents.get(
+                id(parent)
+            )
+            if id(call) not in ctor_ids:
+                return {}, False
+            continue
+        kind = kinds.get(n.id)
+        if kind is None:
+            continue
+        parent = parents.get(id(n))
+        if isinstance(parent, ast.Attribute):
+            grand = parents.get(id(parent))
+            if not (
+                parent.attr in _DYN_METHODS
+                and kind == "dynamic"
+                and isinstance(grand, ast.Call)
+                and grand.func is parent
+                and not grand.keywords
+            ):
+                return {}, False
+        elif isinstance(parent, ast.Subscript):
+            if parent.value is not n:
+                return {}, False
+        elif isinstance(parent, ast.Call):
+            if not (
+                isinstance(parent.func, ast.Name)
+                and parent.func.id == "len"
+                and list(parent.args) == [n]
+                and not parent.keywords
+            ):
+                return {}, False  # passed on: it would escape the function
+        elif isinstance(parent, (ast.For, ast.AsyncFor)):
+            if parent.iter is not n:
+                return {}, False
+        elif isinstance(parent, (ast.If, ast.While, ast.IfExp)):
+            if parent.test is not n:
+                return {}, False
+        elif isinstance(parent, ast.BoolOp):
+            pass  # ``while stack and ...``: a truth test, rewritten below
+        elif isinstance(parent, ast.UnaryOp):
+            if not isinstance(parent.op, ast.Not):
+                return {}, False
+        else:
+            return {}, False  # returned, aliased, compared, ...
+    return kinds, True
+
+
+class _DynArrayRewriter(ast.NodeTransformer):
+    """Replaces ``DynArray`` factories with the representation numba is
+    fastest with -- applied to the *compiled copy* only, so the Python
+    fallback keeps running the original list."""
+
+    def __init__(self, dyn_name: str, np_root: str | None,
+                 kinds: dict[str, str]) -> None:
+        self.dyn_name = dyn_name
+        self.np_root = np_root
+        self.kinds = kinds
+
+    def _truth(self, node: ast.expr) -> ast.expr:
+        """``stack`` -> ``len(stack) > 0`` in test position: numba types the
+        explicit comparison on both representations, while container
+        truthiness is not something to bet a whole function's compilation
+        on.  The Python fallback keeps the idiomatic form."""
+        if isinstance(node, ast.Name) and node.id in self.kinds:
+            return ast.copy_location(
+                ast.Compare(
+                    left=ast.Call(
+                        func=ast.Name(id="len", ctx=ast.Load()),
+                        args=[node],
+                        keywords=[],
+                    ),
+                    ops=[ast.Gt()],
+                    comparators=[ast.Constant(0)],
+                ),
+                node,
+            )
+        return node
+
+    def _visit_test(self, node):
+        node = self.generic_visit(node)
+        node.test = self._truth(node.test)
+        return node
+
+    visit_While = _visit_test
+    visit_If = _visit_test
+    visit_IfExp = _visit_test
+
+    def visit_BoolOp(self, node: ast.BoolOp) -> ast.AST:
+        node = self.generic_visit(node)
+        node.values = [self._truth(v) for v in node.values]
+        return node
+
+    def visit_UnaryOp(self, node: ast.UnaryOp) -> ast.AST:
+        node = self.generic_visit(node)
+        if isinstance(node.op, ast.Not):
+            node.operand = self._truth(node.operand)
+        return node
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        kind = _dyn_ctor_kind(node, self.dyn_name)
+        if kind is None:
+            return self.generic_visit(node)
+        if kind == "dynamic":
+            # numba types a locally built list with no reflection.
+            return ast.copy_location(ast.List(elts=[], ctx=ast.Load()), node)
+        node = self.generic_visit(node)
+        attr = node.func.attr
+        size = node.args[0]
+        if attr == "full":
+            fill = node.args[1] if len(node.args) > 1 else next(
+                (k.value for k in node.keywords if k.arg == "value"), None
+            )
+            if fill is None:
+                return node
+            if self.np_root is not None:
+                return ast.copy_location(
+                    _np_call(self.np_root, "full", [size, fill]), node
+                )
+            return ast.copy_location(_filled_list(fill, size), node)
+        dtype = node.args[1] if len(node.args) > 1 else next(
+            (k.value for k in node.keywords if k.arg == "dtype"), None
+        )
+        is_int = isinstance(dtype, ast.Name) and dtype.id == "int"
+        if self.np_root is not None:
+            args = [size]
+            if is_int:
+                args.append(
+                    ast.Attribute(
+                        value=ast.Name(id=self.np_root, ctx=ast.Load()),
+                        attr="int64",
+                        ctx=ast.Load(),
+                    )
+                )
+            return ast.copy_location(_np_call(self.np_root, "zeros", args), node)
+        zero = ast.Constant(0 if is_int else 0.0)
+        return ast.copy_location(_filled_list(zero, size), node)
+
+
+def _np_call(root: str, attr: str, args: list) -> ast.Call:
+    return ast.Call(
+        func=ast.Attribute(
+            value=ast.Name(id=root, ctx=ast.Load()), attr=attr, ctx=ast.Load()
+        ),
+        args=args,
+        keywords=[],
+    )
+
+
+def _filled_list(value: ast.expr, size: ast.expr) -> ast.ListComp:
+    """``[value for _opast_i in range(size)]`` -- the numpy-free fallback
+    representation for a fixed-capacity buffer (numba builds a typed list
+    from a comprehension; list multiplication it does not support)."""
+    return ast.ListComp(
+        elt=value,
+        generators=[
+            ast.comprehension(
+                target=ast.Name(id="_opast_fill_i", ctx=ast.Store()),
+                iter=ast.Call(
+                    func=ast.Name(id="range", ctx=ast.Load()),
+                    args=[size],
+                    keywords=[],
+                ),
+                ifs=[],
+                is_async=0,
+            )
+        ],
+    )
+
+
 def _mutates_annotated_params(
     func: ast.FunctionDef, ctx: "_ArrayAnnCtx | None",
     peers: frozenset[str] = frozenset(),
@@ -415,6 +672,7 @@ def _numba_compatible(
     consts: frozenset[str] = frozenset(),
     np_root: str | None = None,
     ann_ctx: "_ArrayAnnCtx | None" = None,
+    dyn_name: str | None = None,
 ) -> bool:
     """*peers* are other jit candidates that may be called (call position
     only -- a bare load of a peer would hand numba the fallback wrapper,
@@ -446,6 +704,15 @@ def _numba_compatible(
     # Aggressive ``annotations``: NDArray-annotated, never-rebound
     # parameters count as proven arrays (stores, .size/.shape, slices).
     np_arrays = np_arrays | _annotated_array_params(func, ann_ctx)
+    # ``DynArray`` locals: the marker's contract (see opast.containers) is
+    # what makes the representation swap in the compiled copy legitimate.
+    dyn_kinds: dict[str, str] = {}
+    if dyn_name is not None and dyn_name not in own_names:
+        dyn_kinds, dyn_ok = dyn_locals(func, dyn_name)
+        if not dyn_ok:
+            return False
+        if dyn_kinds:
+            allowed_names.add(dyn_name)
 
     body = list(func.body)
     if (
@@ -469,7 +736,7 @@ def _numba_compatible(
                     if (
                         isinstance(t, ast.Subscript)
                         and isinstance(t.value, ast.Name)
-                        and t.value.id in np_arrays
+                        and (t.value.id in np_arrays or t.value.id in dyn_kinds)
                     ):
                         continue
                     return False
@@ -479,17 +746,33 @@ def _numba_compatible(
                     or (
                         isinstance(node.target, ast.Subscript)
                         and isinstance(node.target.value, ast.Name)
-                        and node.target.value.id in np_arrays
+                        and (
+                            node.target.value.id in np_arrays
+                            or node.target.value.id in dyn_kinds
+                        )
                     )
                 ):
                     return False
             elif isinstance(node, ast.For):
                 if node.orelse or not isinstance(node.target, ast.Name):
                     return False
-                if not _is_range_call(node.iter):
+                if not _is_range_call(node.iter) and not (
+                    isinstance(node.iter, ast.Name)
+                    and node.iter.id in dyn_kinds
+                ):
                     return False
             elif isinstance(node, ast.While):
                 if node.orelse:
+                    return False
+            elif isinstance(node, ast.Expr):
+                call = node.value
+                if not (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Attribute)
+                    and isinstance(call.func.value, ast.Name)
+                    and call.func.value.id in dyn_kinds
+                    and call.func.attr in _DYN_METHODS
+                ):
                     return False
             elif isinstance(node, ast.Raise):
                 # Constant-argument builtin exceptions lower fine in numba;
@@ -548,7 +831,17 @@ def _numba_compatible(
                     and node.attr in _ARRAY_ATTRS
                     and isinstance(node.ctx, ast.Load)
                 )
-                if not (math_attr or np_attr or array_attr):
+                dyn_attr = (
+                    isinstance(node.value, ast.Name)
+                    and (
+                        node.value.id in dyn_kinds
+                        and node.attr in _DYN_METHODS
+                        or node.value.id == dyn_name
+                        and node.attr in ("zeros", "full")
+                    )
+                    and isinstance(node.ctx, ast.Load)
+                )
+                if not (math_attr or np_attr or array_attr or dyn_attr):
                     return False
             elif isinstance(node, ast.Subscript):
                 # Reads: constant index always (tuple element access via
@@ -560,12 +853,13 @@ def _numba_compatible(
                     if not (
                         np_root is not None
                         or np_arrays
+                        or dyn_kinds
                         or _const_int_index(node.slice)
                     ):
                         return False
                 elif not (
                     isinstance(node.value, ast.Name)
-                    and node.value.id in np_arrays
+                    and (node.value.id in np_arrays or node.value.id in dyn_kinds)
                 ):
                     return False
             elif isinstance(node, ast.Call):
@@ -592,11 +886,29 @@ def _numba_compatible(
                     and fn.value.id == np_root
                     and fn.attr in _NP_FUNCS
                 )
-                if not (name_ok or math_call or np_call or peer_call):
+                # ``x.append(v)``/``x.pop()`` on a growable DynArray local,
+                # and the factory calls themselves (rewritten in the copy).
+                dyn_call = (
+                    isinstance(fn, ast.Attribute)
+                    and isinstance(fn.value, ast.Name)
+                    and (
+                        fn.value.id in dyn_kinds
+                        and fn.attr in _DYN_METHODS
+                        or fn.value.id == dyn_name
+                        and fn.attr in ("zeros", "full")
+                    )
+                ) or (
+                    isinstance(fn, ast.Name)
+                    and dyn_name is not None
+                    and fn.id == dyn_name
+                )
+                if not (name_ok or math_call or np_call or peer_call or dyn_call):
                     return False
-                if node.keywords or any(
-                    isinstance(a, ast.Starred) for a in node.args
-                ):
+                if any(isinstance(a, ast.Starred) for a in node.args):
+                    return False
+                # ``DynArray.zeros(n, dtype=int)`` is the one keyword form
+                # in the whitelist; it disappears in the compiled copy.
+                if node.keywords and not dyn_call:
                     return False
                 if peer_call:
                     # walk the arguments but not the callee Name itself
@@ -1104,6 +1416,7 @@ class JitInjection:
             if "annotations" in self.aggressive
             else None
         )
+        dyn_name = dynarray_root(tree, module_counts)
 
         helper = _HELPER_NAME
         taken = all_bound_names(tree) | {
@@ -1135,7 +1448,7 @@ class JitInjection:
                 for name, fn in candidates.items()
                 if _numba_compatible(
                     fn, math_ok, peers=peer_names, consts=consts,
-                    np_root=np_root, ann_ctx=ann_ctx,
+                    np_root=np_root, ann_ctx=ann_ctx, dyn_name=dyn_name,
                 )
             }
             calls = {
@@ -1212,21 +1525,40 @@ class JitInjection:
                 candidates[name], ann_ctx, peers=frozenset(calls.get(name, ()))
             )
 
+        # A function holding DynArray locals must be compiled from a copy:
+        # the representation swap belongs to the compiled body only, so the
+        # untouched original stays available as the Python fallback.
+        dyn_users = {
+            name
+            for name in candidates
+            if dyn_name is not None and dyn_locals(candidates[name], dyn_name)[0]
+        }
+
+        def _make_src(func: ast.FunctionDef):
+            src = copy.deepcopy(func)
+            src_name = f"_opast_jitsrc_{func.name}"
+            while src_name in taken:
+                src_name += "_"
+            taken.add(src_name)
+            src.name = src_name
+            if calls[func.name]:
+                _PeerCallRewriter(
+                    {g: njit_names[g] for g in calls[func.name]}
+                ).visit(src)
+            if func.name in dyn_users:
+                _DynArrayRewriter(
+                    dyn_name, np_root, dyn_locals(func, dyn_name)[0]
+                ).visit(src)
+                ast.fix_missing_locations(src)
+            return src, src_name
+
         new_body: list[ast.stmt] = []
         for stmt in tree.body:
             new_body.append(stmt)
             if isinstance(stmt, ast.FunctionDef) and stmt.name in lazy:
                 keywords = []
-                if calls[stmt.name]:
-                    src = copy.deepcopy(stmt)
-                    src_name = f"_opast_jitsrc_{stmt.name}"
-                    while src_name in taken:
-                        src_name += "_"
-                    taken.add(src_name)
-                    src.name = src_name
-                    _PeerCallRewriter(
-                        {g: njit_names[g] for g in calls[stmt.name]}
-                    ).visit(src)
+                if calls[stmt.name] or stmt.name in dyn_users:
+                    src, src_name = _make_src(stmt)
                     # The copy must be defined before the decorator call
                     # that references it evaluates.
                     new_body.insert(len(new_body) - 1, src)
@@ -1278,19 +1610,12 @@ class JitInjection:
             ):
                 continue
             func = stmt
-            if calls[func.name]:
-                # The compiled copy calls the raw dispatchers; the original
-                # def stays untouched as the Python fallback (its calls hit
-                # the wrappers, which guard their own fallback).
-                src = copy.deepcopy(func)
-                src_name = f"_opast_jitsrc_{func.name}"
-                while src_name in taken:
-                    src_name += "_"
-                taken.add(src_name)
-                src.name = src_name
-                _PeerCallRewriter(
-                    {g: njit_names[g] for g in calls[func.name]}
-                ).visit(src)
+            if calls[func.name] or func.name in dyn_users:
+                # The compiled copy calls the raw dispatchers and holds the
+                # DynArray representation swap; the original def stays
+                # untouched as the Python fallback (its calls hit the
+                # wrappers, which guard their own fallback).
+                src, src_name = _make_src(func)
                 new_body.append(src)
                 new_body.append(
                     ast.Assign(

@@ -20,8 +20,14 @@ string of pass names (see :data:`PASS_NAMES`, plus ``"jit"``) to skip::
 
     optimize_file("script.py", disable="inline,licm")
     run_source("print(1+1)", disable=("constant-folding",))
+
+:class:`DynArray` (a plain ``list`` subclass) lets a hot function state
+that a numeric container is homogeneous, private and identity-agnostic, so
+the ``--jit`` path may compile it as a numba list or a numpy buffer; see
+:mod:`opast.containers`.
 """
 
+from .containers import DynArray
 from .pipeline import (
     AGGRESSIVE_NAMES,
     DEFAULT_MAX_ITERATIONS,
@@ -47,6 +53,7 @@ __version__ = "0.5.0"
 
 __all__ = [
     "AGGRESSIVE_NAMES",
+    "DynArray",
     "DEFAULT_MAX_ITERATIONS",
     "PASS_NAMES",
     "OptimizationReport",

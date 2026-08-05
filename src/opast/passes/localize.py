@@ -157,20 +157,23 @@ class GlobalLocalization(ScopedTransformer):
             if c == 1 and name in direct_index and name not in global_declared
         }
 
-        # Under --jit, the whitelist roots (``math``, a single-binding numpy
-        # import alias) must stay global references: a localized alias would
-        # evict otherwise-eligible candidates from numba's typing.  The same
-        # goes for module-level function names: ``_x = peer`` inside a
-        # caller hides the peer call from the jit pass's candidate fixpoint.
+        # Under --jit, names the numba whitelist keys on must stay global
+        # references: an alias would evict otherwise-eligible candidates.
+        # That covers every module-level import binding (``math``, a numpy
+        # alias, ``DynArray``) -- the whitelist recognises them by name, and
+        # aliasing them has bitten three separate features already -- plus
+        # module-level function names, since ``_x = peer`` inside a caller
+        # hides the peer call from the candidate fixpoint.
         self._jit_roots: set[str] = set()
         if self.jit_mode:
             for stmt in tree.body:
-                if isinstance(stmt, ast.Import):
+                if isinstance(stmt, (ast.Import, ast.ImportFrom)):
                     for alias in stmt.names:
-                        if alias.name in ("math", "numpy"):
-                            root = alias.asname or alias.name
-                            if counts.get(root, 0) == 1:
-                                self._jit_roots.add(root)
+                        if alias.name == "*":
+                            continue
+                        root = alias.asname or alias.name.split(".")[0]
+                        if counts.get(root, 0) == 1:
+                            self._jit_roots.add(root)
                 elif isinstance(stmt, ast.FunctionDef):
                     self._jit_roots.add(stmt.name)
 
