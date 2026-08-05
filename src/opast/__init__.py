@@ -43,7 +43,7 @@ def load_ipython_extension(ipython) -> None:
     _load(ipython)
 
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "AGGRESSIVE_NAMES",
