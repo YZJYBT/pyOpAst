@@ -12,10 +12,10 @@ CPython 3.14.2(Windows),21 个内置负载,每变体 best-of-5,各变体输出�
 
 | 模式 | geomean 加速 |
 | --- | --- |
-| 普通(仅证明背书的默认层,产物是纯 CPython 源码) | **2.34x** |
-| 激进 `-O3`(全部假设背书选项,含 numba jit) | **15.6x** |
+| 普通(仅证明背书的默认层,产物是纯 CPython 源码) | **2.23x** |
+| 激进 `-O3`(全部假设背书选项,含 numba jit) | **18.7x** |
 
-个别行:常量 `eval`/`getattr` 去动态化 **48x**、内联→折叠级联 **2.4x**(`-O3` 下 41x)、循环不变量外提 **1.8x**、日常风格结算报表脚本 **1.6x**;numba 能整体接管的数值核在 `-O3` 下达 **50–140x**。`control` 负载(无可优化项)保持 **0.99x**、0 改写——证明不了的,一律不碰。
+个别行:常量 `eval`/`getattr` 去动态化 **34.5x**、内联→折叠级联 **2.4x**(`-O3` 下 50x)、循环不变量外提 **1.9x**、日常风格结算报表脚本 **1.3x**;numba 能整体接管的数值核在 `-O3` 下达 **50–1200x**。`control` 负载无可优化项、**0 改写**——它在各轮之间 0.91x–1.03x 的抖动是测量噪声本底,不是效应。
 
 ### 与 PyPy 可叠加
 
@@ -179,35 +179,35 @@ python -m opast.bench my_hot_script.py         # 也可测任意脚本(可选定
 ```text
 workload       original    default  speedup  aggressive  speedup  changes  result
 ---------------------------------------------------------------------------------
-algebra         192.6ms     92.3ms    2.09x       9.3ms   48.47x      8/9  OK
-annotated       129.8ms    118.5ms    1.09x       1.0ms  134.64x     8/21  OK
-attrhoist        45.5ms     35.7ms    1.27x      34.5ms    1.54x     9/18  OK
-comptomap       443.6ms    192.8ms    2.30x     199.6ms    2.56x     11/8  OK
-condnarrow       90.6ms     56.1ms    1.61x       1.0ms   81.08x      7/8  OK
-control         131.6ms    133.1ms    0.99x      91.2ms    1.38x      0/2  OK
-daily           231.2ms    145.5ms    1.59x     146.2ms    1.46x    47/48  OK
-dedynamize     1067.9ms     22.3ms   47.99x      12.5ms   87.16x      2/5  OK
-fastmath         86.2ms     82.3ms    1.05x       0.7ms  142.05x      0/5  OK
-inline          712.8ms    527.6ms    1.35x      17.9ms   41.20x    10/13  OK
-inlinestmt      176.1ms    147.7ms    1.19x       4.3ms   40.17x      3/4  OK
-jitlazy         278.7ms    271.4ms    1.03x       4.8ms   59.03x      1/2  OK
-lencache         75.3ms     53.8ms    1.40x      59.4ms    1.26x      2/2  OK
-licm            120.3ms     67.3ms    1.79x      61.1ms    1.95x      6/7  OK
-localize        221.9ms    210.5ms    1.05x     220.0ms    1.05x      4/2  OK
-loopfold        268.5ms      0.1ms 5153.70x       0.1ms 5088.05x    21/21  OK
-looptocomp       62.5ms     59.2ms    1.06x      55.8ms    1.14x      4/4  OK
-mixed           252.8ms    103.6ms    2.44x       6.4ms   41.35x    19/21  OK
-rangeiter        83.4ms     81.3ms    1.03x      72.6ms    1.11x      2/2  OK
-strength        479.2ms    401.1ms    1.19x      15.6ms   30.28x      7/8  OK
-tailrec         241.1ms    252.0ms    0.96x       2.2ms  115.16x      1/4  OK
+algebra         299.4ms    136.8ms    2.19x      10.8ms   35.60x      8/9  OK
+annotated       119.8ms    122.6ms    0.98x       0.9ms  134.17x     8/21  OK
+attrhoist        46.2ms     35.2ms    1.32x      34.3ms    1.31x     9/18  OK
+comptomap       420.1ms    179.3ms    2.34x     181.6ms    2.22x     11/8  OK
+condnarrow       80.2ms     50.1ms    1.60x       1.7ms   51.32x      7/8  OK
+control         113.0ms    124.0ms    0.91x      81.1ms    1.53x      0/2  OK
+daily           178.1ms    136.5ms    1.30x     145.0ms    1.28x    47/48  OK
+dedynamize      817.3ms     23.7ms   34.52x      10.0ms   65.39x      2/5  OK
+fastmath         79.8ms     76.5ms    1.04x       1.0ms   71.01x      0/5  OK
+inline          615.7ms    437.5ms    1.41x      12.0ms   50.05x    10/13  OK
+inlinestmt      156.8ms    125.5ms    1.25x       4.0ms   38.33x      3/4  OK
+jitlazy         241.4ms    236.4ms    1.02x       0.2ms 1035.42x      1/2  OK
+lencache         68.4ms     58.9ms    1.16x      54.0ms    1.00x      2/3  OK
+licm            112.7ms     60.0ms    1.88x      61.9ms    1.92x      6/7  OK
+localize        203.7ms    194.4ms    1.05x     201.4ms    1.02x      4/2  OK
+loopfold        230.9ms      0.1ms 3761.35x       0.0ms 17574.18x    21/38  OK
+looptocomp       59.4ms     57.1ms    1.04x      52.2ms    1.10x      4/5  OK
+mixed           243.6ms    102.4ms    2.38x       9.1ms   25.16x    19/29  OK
+rangeiter        80.1ms     76.0ms    1.05x      59.6ms    1.32x      2/3  OK
+strength        405.3ms    340.1ms    1.19x      14.4ms   26.56x      7/8  OK
+tailrec         226.3ms    227.7ms    0.99x       0.2ms 1209.97x      1/4  OK
 ---------------------------------------------------------------------------------
-geomean: default 2.34x | aggressive 15.64x
+geomean: default 2.23x | aggressive 18.72x
 ```
 
 诚实地读这张表:
 
-- **`loopfold`(~5000x)是构造出的极端案例**,不是典型收益:整个计算发生在**优化期**(常量循环闭式折叠),运行期脚本只剩常量赋值。真实的账是"优化期一次性付 ~0.13s,之后每次运行省 ~0.27s"。`dedynamize`(48x)同理——热循环里的常量 `eval`/`getattr` 坍缩为静态代码。
-- **中间行才是代表性数字**:`mixed` 2.44x、`comptomap` 2.30x、`algebra` 2.09x、`licm` 1.79x、`condnarrow` 1.61x、`daily`(一次触及多数 pass 的真实风格订单结算报表)1.59x。
+- **`loopfold`(数千倍)是构造出的极端案例**,不是典型收益:整个计算发生在**优化期**(常量循环闭式折叠),运行期脚本只剩常量赋值。真实的账是"优化期一次性付 ~0.13s,之后每次运行省 ~0.23s"。`dedynamize`(34.5x)同理——热循环里的常量 `eval`/`getattr` 坍缩为静态代码。
+- **中间行才是代表性数字**:`mixed` 2.38x、`comptomap` 2.34x、`algebra` 2.19x、`licm` 1.88x、`condnarrow` 1.60x、`daily`(一次触及多数 pass 的真实风格订单结算报表)1.30x。
 - **激进列的三位数是 numba 的本职**——有意思的地方在于 opast 的改写(去动态化、内联、类型化)让函数**变得可 jit**,你不用重构任何代码;numba 任何失败运行期自动回退纯 Python。
 - 100ms 以下的行有百分之几的轮间噪声(`control` 历次在 0.92x–1.09x 间浮动),±0.05x 当测量抖动看待。数字来自单台机器——用上面的命令在你自己的机器上复现。
 
