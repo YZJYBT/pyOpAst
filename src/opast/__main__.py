@@ -57,6 +57,13 @@ def main(argv: list[str] | None = None) -> int:
                              "(optional dependency 'opast[jit]'; any numba "
                              "failure falls back to plain Python at runtime; "
                              "see README for the int64 caveat)")
+    parser.add_argument("--cython", action="store_true",
+                        help="emit @cython.locals(...) where a C type is "
+                             "proven, for source you intend to compile with "
+                             "Cython; the output is still plain Python and "
+                             "runs without Cython installed. Different "
+                             "target from --jit, which wins if both are "
+                             "given")
     parser.add_argument("--aggressive", "-O3", nargs="?", const=True,
                         default=None, metavar="OPTIONS",
                         help="enable assumption-backed optimization; bare "
@@ -121,12 +128,12 @@ def main(argv: list[str] | None = None) -> int:
             result = optimize_source(
                 ns.code, filename="<string>",
                 max_iterations=ns.max_iterations, jit=ns.jit,
-                disable=ns.disable, aggressive=aggressive,
+                disable=ns.disable, aggressive=aggressive, cython=ns.cython,
             )
         else:
             result = optimize_file(
                 ns.script, max_iterations=ns.max_iterations, jit=ns.jit,
-                disable=ns.disable, aggressive=aggressive,
+                disable=ns.disable, aggressive=aggressive, cython=ns.cython,
             )
     except ValueError as exc:  # unknown --disable pass name
         parser.error(str(exc))

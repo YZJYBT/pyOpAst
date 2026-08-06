@@ -6,6 +6,7 @@ from .base import ScopedTransformer
 from .comprehension import ComprehensionToMap
 from .condnarrow import ConditionNarrowing
 from .cse import CommonSubexpressionElimination
+from .cyannotate import CythonAnnotation
 from .deadcode import DeadCodeElimination
 from .dedynamize import DeDynamize
 from .fission import LoopFission
@@ -26,6 +27,7 @@ from .vectorize import VectorizeLoops
 
 __all__ = [
     "ScopedTransformer",
+    "CythonAnnotation",
     "DeDynamize",
     "ConstantFolding",
     "ConstantPropagation",

@@ -105,6 +105,7 @@ def _optimize_one(
             jit=ns.jit,
             disable=disable,
             aggressive=aggressive,
+            cython=ns.cython,
         )
         text = _shebang(src) + result.source + "\n"
     except Exception as exc:
@@ -160,6 +161,11 @@ def main(argv: list[str] | None = None) -> int:
                              "NOTE: the output then imports opast.jitsupport "
                              "at runtime -- bundle opast and numba when "
                              "freezing")
+    parser.add_argument("--cython", action="store_true",
+                        help="emit @cython.locals(...) where a C type is "
+                             "proven, so the built tree is ready for "
+                             "cythonize; output stays plain Python and needs "
+                             "no Cython to run (different target from --jit)")
     parser.add_argument("--aggressive", "-O3", nargs="?", const=True,
                         default=None, metavar="OPTIONS",
                         help="enable assumption-backed optimization; bare "

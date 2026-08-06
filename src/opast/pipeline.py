@@ -15,6 +15,7 @@ from .passes import (
     ConditionNarrowing,
     ConstantFolding,
     ConstantPropagation,
+    CythonAnnotation,
     DeadCodeElimination,
     DeDynamize,
     FunctionInlining,
@@ -89,6 +90,7 @@ PASS_CLASSES = (
 PASS_NAMES = tuple(cls.name for cls in PASS_CLASSES) + (
     SlotsInjection.name,
     VectorizeLoops.name,
+    CythonAnnotation.name,
 )
 
 DEFAULT_MAX_ITERATIONS = 8
@@ -397,6 +399,7 @@ def optimize_ast(
     jit: bool = False,
     disable=(),
     aggressive=(),
+    cython: bool = False,
 ) -> tuple[ast.Module, OptimizationReport]:
     """Optimise *tree* in place-ish (the returned tree should be used).
 
@@ -408,10 +411,16 @@ def optimize_ast(
     of :data:`AGGRESSIVE_NAMES`, or a subset (iterable or comma-separated
     string).  ``"jit"`` there is equivalent to the *jit* flag; *disable*
     still wins over both.
+
+    *cython* attaches ``@cython.locals(...)`` where a C type is proven, for
+    source meant to be compiled by Cython (see
+    :mod:`opast.passes.cyannotate`).  It is a different compilation target
+    from *jit*, which wins if both are given.
     """
     disabled = _normalize_disable(disable)
     aggressive = normalize_aggressive(aggressive)
     jit = (jit or "jit" in aggressive) and "jit" not in disabled
+    cython = cython and not jit and CythonAnnotation.name not in disabled
     slots = "slots" in aggressive and SlotsInjection.name not in disabled
     vectorize = "numpy" in aggressive and VectorizeLoops.name not in disabled
     active = [cls for cls in PASS_CLASSES if cls.name not in disabled]
@@ -488,6 +497,17 @@ def optimize_ast(
         tree = vec_pass.run(tree)
         report.record(vec_pass)
         ast.fix_missing_locations(tree)
+    if cython:
+        # One-shot, after the fixpoint: the types it can prove are the ones
+        # holding on the *final* tree, and every rewrite before it (folding,
+        # narrowing, strength reduction) can only tighten an interval.
+        cy_pass = CythonAnnotation()
+        # Bare ``int``/``float`` parameter annotations are only trustworthy
+        # under the aggressive option that says so.
+        cy_pass.aggressive = aggressive & frozenset({"annotations"})
+        tree = cy_pass.run(tree)
+        report.record(cy_pass)
+        ast.fix_missing_locations(tree)
     if jit:
         # One-shot, after the fixpoint: decorates hot numeric functions with
         # opast.jitsupport.maybe_njit (opt-in, see README caveats).
@@ -510,6 +530,7 @@ def optimize_source(
     jit: bool = False,
     disable=(),
     aggressive=(),
+    cython: bool = False,
 ) -> OptimizationResult:
     tree = ast.parse(source, filename=filename)
     tree, report = optimize_ast(
@@ -518,6 +539,7 @@ def optimize_source(
         jit=jit,
         disable=disable,
         aggressive=aggressive,
+        cython=cython,
     )
     return OptimizationResult(tree=tree, report=report, filename=filename)
 
@@ -528,6 +550,7 @@ def optimize_file(
     jit: bool = False,
     disable=(),
     aggressive=(),
+    cython: bool = False,
 ) -> OptimizationResult:
     path = Path(path)
     with tokenize.open(path) as fh:  # honours PEP 263 encoding cookies
@@ -539,4 +562,5 @@ def optimize_file(
         jit=jit,
         disable=disable,
         aggressive=aggressive,
+        cython=cython,
     )

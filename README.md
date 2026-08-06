@@ -296,6 +296,28 @@ After the static fixpoint, a one-shot pass decorates hot numeric functions with 
 
 ⚠️ Opt-in semantic caveat: numba integers are fixed 64-bit — intermediate values beyond ±9.2e18 wrap silently. This is why `--jit` is not on by default and not part of the semantic-preservation contract; the verification above is a safety net, not a proof.
 
+## Experimental: `--cython` (a correctness fix, not a speedup)
+
+```powershell
+opast -O2 --cython -o build/hot.py hot.py
+cythonize -i build/hot.py                  # your own build step
+```
+
+`--cython` emits Cython pure-Python-mode annotations into the optimized source: `@cython.locals(...)` where a C type is **proven**, and `@cython.infer_types(False)` on every function. The output is still plain Python — a guarded import shim keeps it running on an interpreter with no Cython installed — so this only matters if you go on to compile it.
+
+The reason it exists is not speed. **Stock `cythonize` is not semantics-preserving**, and two of its deviations are reproducible in this repo's own benchmark suite:
+
+| Plain, correct Python | Stock Cython | opast `--cython` |
+| --- | --- | --- |
+| `[j * j % 97 for j in range(0, 400000, 4)]` → last element `54` | **`20`** — it infers a C `long` for `j`, which is 32 bits under MSVC, and `399996²` wraps | `54` |
+| reading a conditionally-bound local raises `UnboundLocalError` | **returns `0`** — a C variable has no unbound state | raises |
+
+Both come from Cython's own "safe" type inference, which has no interval analysis to consult; opast's does (`j * j` is provably in `(0, 159996800016)`, so it needs 64 bits, so `j` must not be a 32-bit `long`). Turning that inference off is what restores the semantics, and the types opast can prove go back in explicitly.
+
+Measured honestly, on 21 workloads, best-of-7, all compiled by Cython: **0.93x geomean** against the same source compiled with stock Cython — a *loss*, because Cython's speed on several rows came from exactly the inference that produced the wrong answer above (the miscompiled comprehension was 1.55x faster than the correct one). Typing itself covers very little today: the all-or-nothing rule below leaves 2 of 52 benchmark functions typed, because a partially typed expression boxes values back into Python objects and measured **worse** than no typing at all (0.72x on a loop whose counter was typed and whose accumulator was not).
+
+What a name must satisfy to be typed: proven float (a Python float *is* a C double), or proven int with an interval inside int64; definitely bound before every read; not captured by a nested scope or comprehension; not `del`eted, `global`/`nonlocal`, or compared with `is`; and every operand it meets in arithmetic must be typed too. The gap to the ceiling is the interval analysis, not the mechanism — hand-typing all five locals of a loop opast declines to type measured **11.35x**.
+
 ## Python API
 
 ```python
