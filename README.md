@@ -32,6 +32,10 @@ CPython 3.14.2 (Windows), 21 built-in workloads, best of 5 runs per variant, out
 
 A few individual rows: constant `eval`/`getattr` de-dynamization **48x**, inline→fold cascades **2.4x** (41x under `-O3`), loop-invariant motion **1.8x**, a "daily-style" report script **1.6x** — and numeric kernels that numba can take whole reach **50–140x** under `-O3`. The `control` workload (nothing optimizable) stays at **0.99x** with 0 rewrites: what opast cannot prove, it does not touch.
 
+### It stacks with PyPy
+
+The default tier emits plain Python source with no runtime of its own, so it is not an alternative to a faster interpreter — it composes with one. Running the default-tier output on **PyPy 7.3.21** instead of the original source is a **1.98x** geomean over the same 21 workloads (best of 3, fresh process per run). The wins there come from the rewrites PyPy's tracing JIT cannot do for you — de-dynamization, optimize-time loop folding, comprehension and hoisting rewrites — while a few workloads come out slightly slower, because the JIT sometimes prefers the shape you wrote. `--jit` is CPython-only (numba), so on PyPy stay on the default tier.
+
 ### Self-hosting check
 
 opast optimizes **itself** (`python -m opast.build src/opast -o out/opast`): 841 rewrites across 57 files, zero fallbacks — and the self-optimized copy then produces **byte-identical output** to the original over the whole benchmark corpus and passes the full acceptance suite, the classic compiler bootstrap test. Modules that genuinely use `exec`/`compile` (the runner, the import hook) are skipped whole by the dynamic-code rule, exactly as documented. Honest footnote: the self-optimized optimizer is *not faster* (0.98x, within noise) — opast's own hot paths are method-heavy visitor classes, which is precisely the territory the proof-backed tier leaves alone. Semantics preservation survives its harshest user; the speedups live in code shaped like the benchmarks above.
