@@ -86,7 +86,11 @@ opast -O3 script.py                           # 同义别名
 opast --aggressive=all script.py              # 显式写法,与上等价
 opast --aggressive=annotations script.py      # 只开指定项
 opast --aggressive --disable jit script.py    # 全开但排除某项
+opast -O2 script.py                           # 激进层,但不碰第三方库
+opast --aggressive=stdlib,numpy script.py     # 组别名再加回一项
 ```
+
+`-O2`(即 `--aggressive=stdlib`)是同一层契约,只排除产物会依赖第三方包的两项——`jit`(numba)与 `numpy`。这两项在包缺失时都会退回纯 Python,但**产物源码里仍会出现它们**;`-O2` 保证优化后的代码在一个只有标准库的解释器上照跑,适合冻结打包、分发单文件、或目标机上根本没装 numba/numpy 的场景。`stdlib` 是**组别名**,可以出现在任何写选项名的位置,因此能组合:`--aggressive=stdlib,numpy` 就是"标准库那批 + 再把 numpy 加回来"。
 
 | 选项 | 换来什么 | 赌的假设 |
 | --- | --- | --- |
@@ -233,10 +237,10 @@ run_source("x = 1 + 2", disable=("constant-folding", "const-prop"))
 ```powershell
 python -m opast.build src/ -o build_opt/ --entry main.py   # 整树优化,非 .py 文件原样复制
 pyinstaller build_opt/main.py                              # 对优化后的树打包
-python -m opast.build src/ -o build_opt/ -O3 --disable jit # 激进层但保持零运行时依赖
+python -m opast.build src/ -o build_opt/ -O2               # 激进层但零第三方依赖
 ```
 
-递归优化目录下所有 `.py` 到镜像输出树(`__pycache__`/VCS 目录自动跳过,`--exclude` 可加);优化不了的文件(语法错误等)原样复制并警告——构建永不中断(`--strict` 则改为报错退出)。目录构建把每个文件当**库模块**:整个顶层都是公共 API,故 unused 消除与激进的 `module-locals` 选项一并强制关闭("模块内无人读取的名字"正是导入方要读的;import hook 现在也执行同一契约);入口脚本用 `--entry main.py` 标记以恢复完整脚本级清理。默认层产物是**零 opast 运行时依赖**的普通 Python 源码,适合冻结打包;`--jit` 产物运行期要 import `opast.jitsupport`——冻结时需连带打包 opast 和 numba。注释与排版不保留(行首 `#!` shebang 保留),行号会漂移。
+递归优化目录下所有 `.py` 到镜像输出树(`__pycache__`/VCS 目录自动跳过,`--exclude` 可加);优化不了的文件(语法错误等)原样复制并警告——构建永不中断(`--strict` 则改为报错退出)。目录构建把每个文件当**库模块**:整个顶层都是公共 API,故 unused 消除与激进的 `module-locals` 选项一并强制关闭("模块内无人读取的名字"正是导入方要读的;import hook 现在也执行同一契约);入口脚本用 `--entry main.py` 标记以恢复完整脚本级清理。默认层产物是**零 opast 运行时依赖**的普通 Python 源码,适合冻结打包,`-O2`(激进层去掉 numba/numpy 两项)同样如此;`--jit` 产物运行期要 import `opast.jitsupport`——冻结时需连带打包 opast 和 numba。注释与排版不保留(行首 `#!` shebang 保留),行号会漂移。
 
 IPython / Jupyter(cell magic):
 
@@ -250,7 +254,7 @@ for i in range(50_000):
 total          # 末尾表达式照常显示、照常绑定到 _
 ```
 
-选项与 CLI 一致(`--show/--report/--no-run/--jit/--disable/--max-iterations`);cell 在用户命名空间执行,赋值跨 cell 保留。**注意**:优化分析以单个 cell 为"模块"视角,其他 cell 里定义的名字对分析不可见——若之前的 cell 重绑过内置名(如 `range = ...`),依赖模块级判定的 pass(内联、去动态化、comp-to-map)可能误判,请对相关 cell 用 `--disable` 或不加 magic;cell 内不能混用其他 magic / `!` 转义(无法解析)。
+选项与 CLI 一致(`--show/--report/--no-run/--jit/--aggressive/-O3/-O2/--disable/--max-iterations`);`%%opast -O2` 就是激进层去掉 numba/numpy 两项,内核里没装这两个包时正好用它。cell 在用户命名空间执行,赋值跨 cell 保留。**注意**:优化分析以单个 cell 为"模块"视角,其他 cell 里定义的名字对分析不可见——若之前的 cell 重绑过内置名(如 `range = ...`),依赖模块级判定的 pass(内联、去动态化、comp-to-map)可能误判,请对相关 cell 用 `--disable` 或不加 magic;cell 内不能混用其他 magic / `!` 转义(无法解析)。
 
 ## 实验性:`--jit`(numba 加速,默认关闭)
 

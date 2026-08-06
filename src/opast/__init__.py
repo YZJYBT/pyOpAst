@@ -29,9 +29,11 @@ the ``--jit`` path may compile it as a numba list or a numpy buffer; see
 
 from .containers import DynArray
 from .pipeline import (
+    AGGRESSIVE_GROUPS,
     AGGRESSIVE_NAMES,
     DEFAULT_MAX_ITERATIONS,
     PASS_NAMES,
+    THIRD_PARTY_OPTIONS,
     OptimizationReport,
     OptimizationResult,
     PassStats,
@@ -52,10 +54,12 @@ def load_ipython_extension(ipython) -> None:
 __version__ = "0.6.0"
 
 __all__ = [
+    "AGGRESSIVE_GROUPS",
     "AGGRESSIVE_NAMES",
     "DynArray",
     "DEFAULT_MAX_ITERATIONS",
     "PASS_NAMES",
+    "THIRD_PARTY_OPTIONS",
     "OptimizationReport",
     "OptimizationResult",
     "PassStats",

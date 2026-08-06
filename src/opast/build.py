@@ -23,8 +23,8 @@ The default tier emits plain Python with **no runtime dependency on
 opast**, which is what makes the output suitable for freezing (PyInstaller
 and friends).  ``--jit`` output, by contrast, decorates hot functions with
 ``opast.jitsupport.maybe_njit`` -- bundle opast and numba if you freeze it,
-or ``--aggressive --disable jit`` for the assumption-backed tier without
-the runtime dependency.
+or use ``-O2`` (``--aggressive=stdlib``) for the assumption-backed tier
+with no third-party dependency at all.
 
 Same caveats as the single-file CLI ``-o``: comments and formatting are
 not preserved (the output is unparsed from the AST; a leading ``#!``
@@ -45,6 +45,7 @@ from .pipeline import (
     AGGRESSIVE_NAMES,
     DEFAULT_MAX_ITERATIONS,
     PASS_NAMES,
+    THIRD_PARTY_OPTIONS,
     _normalize_disable,
     normalize_aggressive,
     optimize_file,
@@ -166,6 +167,14 @@ def main(argv: list[str] | None = None) -> int:
                              + ", ".join(AGGRESSIVE_NAMES)
                              + " (jit included -- see --jit's note; use "
                                "--disable jit to stay dependency-free)")
+    parser.add_argument("-O2", dest="aggressive", action="store_const",
+                        const="stdlib",
+                        help="like -O3 minus the options that need a "
+                             "third-party package ("
+                             + ", ".join(sorted(THIRD_PARTY_OPTIONS))
+                             + "), keeping the build freezable with no extra "
+                               "runtime dependency; same as "
+                               "--aggressive=stdlib")
     parser.add_argument("--disable", metavar="PASSES", default="",
                         help="comma-separated pass names to skip: "
                              + ", ".join((*PASS_NAMES, "jit")))

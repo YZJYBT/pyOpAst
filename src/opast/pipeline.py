@@ -112,6 +112,20 @@ AGGRESSIVE_NAMES = (
     "unbounded-recursion",
 )
 
+#: Aggressive options whose *output* leans on a third-party package: ``jit``
+#: emits numba decorators, ``numpy`` emits a vectorized twin guarded by a
+#: numpy import.  Both degrade to plain Python when the package is missing,
+#: but the emitted source still mentions it -- excluding them is what makes
+#: the ``stdlib`` group (``-O2``) safe to ship to a bare interpreter.
+THIRD_PARTY_OPTIONS = frozenset({"jit", "numpy"})
+
+#: Group aliases usable anywhere an option name is, including inside a
+#: comma-separated list (``--aggressive=stdlib,numpy`` re-adds one).
+AGGRESSIVE_GROUPS = {
+    "all": frozenset(AGGRESSIVE_NAMES),
+    "stdlib": frozenset(AGGRESSIVE_NAMES) - THIRD_PARTY_OPTIONS,
+}
+
 #: One line per aggressive option, printed by ``--report`` so the user can
 #: see exactly which bets are in play.
 AGGRESSIVE_ASSUMPTIONS = {
@@ -275,22 +289,37 @@ def rewrite_aggressive_argv(argv: list[str], value_options) -> list[str]:
 
 def normalize_aggressive(aggressive) -> frozenset[str]:
     """Accept True/None (meaning *all*), an iterable, or a comma-separated
-    string; reject unknown names loudly."""
+    string; reject unknown names loudly.
+
+    A group alias from :data:`AGGRESSIVE_GROUPS` (``all``, ``stdlib``) stands
+    for a set of options and may be mixed with plain names, so
+    ``stdlib,numpy`` means "everything that needs no third-party package,
+    plus numpy after all".
+    """
     if aggressive is None or aggressive is False:
         return frozenset()
-    if aggressive is True or aggressive == "all":
-        return frozenset(AGGRESSIVE_NAMES)
+    if aggressive is True:
+        return AGGRESSIVE_GROUPS["all"]
     if isinstance(aggressive, str):
         names = [part.strip() for part in aggressive.split(",") if part.strip()]
     else:
         names = list(aggressive)
-    unknown = sorted(set(names) - set(AGGRESSIVE_NAMES))
+    selected: set[str] = set()
+    plain: list[str] = []
+    for name in names:
+        group = AGGRESSIVE_GROUPS.get(name)
+        if group is None:
+            plain.append(name)
+        else:
+            selected |= group
+    unknown = sorted(set(plain) - set(AGGRESSIVE_NAMES))
     if unknown:
         raise ValueError(
             f"unknown aggressive option(s): {', '.join(unknown)} "
-            f"(valid: {', '.join(AGGRESSIVE_NAMES)})"
+            f"(valid: {', '.join(AGGRESSIVE_NAMES)}; "
+            f"groups: {', '.join(sorted(AGGRESSIVE_GROUPS))})"
         )
-    return frozenset(names)
+    return frozenset(selected | set(plain))
 
 
 def _normalize_disable(disable) -> frozenset[str]:

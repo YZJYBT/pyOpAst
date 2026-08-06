@@ -5,16 +5,19 @@ Usage::
     %load_ext opast          # or: %load_ext opast.magic
 
     %%opast [--show] [--report] [--no-run] [--jit] [--aggressive[=OPTIONS]]
-            [--disable PASSES] [--max-iterations N]
+            [-O3] [-O2] [--disable PASSES] [--max-iterations N]
     total = 0
     for i in range(50_000):
         total += i * 2
     total
 
-``--aggressive`` mirrors the CLI's ``-O3``: bare it enables every option in
-:data:`opast.pipeline.AGGRESSIVE_NAMES`, or pass a comma-separated subset
-(``--aggressive=annotations,numpy``).  ``--report`` then lists the
-assumptions actually in play.
+``--aggressive`` (spelled ``-O3`` as on the CLI) bare enables every option
+in :data:`opast.pipeline.AGGRESSIVE_NAMES`, or pass a comma-separated
+subset (``--aggressive=annotations,numpy``).  ``-O2`` is the same tier
+minus the options that need a third-party package
+(:data:`opast.pipeline.THIRD_PARTY_OPTIONS`: ``jit``, ``numpy``), for a
+kernel where numba/numpy are absent or you want the cell to stay pure
+Python.  ``--report`` then lists the assumptions actually in play.
 
 The cell is optimized with the regular pipeline and executed in the
 interactive namespace, so assignments persist across cells and a trailing
@@ -56,6 +59,7 @@ from .pipeline import (
     AGGRESSIVE_NAMES,
     DEFAULT_MAX_ITERATIONS,
     PASS_NAMES,
+    THIRD_PARTY_OPTIONS,
     OptimizationResult,
     optimize_ast,
 )
@@ -77,11 +81,17 @@ class OpastMagics(Magics):
     @magic_arguments.argument("--jit", action="store_true",
                               help="numba-accelerate hot numeric code "
                                    "(opt-in; see README for the int64 caveat)")
-    @magic_arguments.argument("--aggressive", nargs="?", const=True,
+    @magic_arguments.argument("--aggressive", "-O3", nargs="?", const=True,
                               default=None, metavar="OPTIONS",
                               help="assumption-backed optimization; bare flag "
                                    "enables all of "
                                    + ", ".join(AGGRESSIVE_NAMES))
+    @magic_arguments.argument("-O2", dest="aggressive", action="store_const",
+                              const="stdlib",
+                              help="like -O3 minus the options needing a "
+                                   "third-party package ("
+                                   + ", ".join(sorted(THIRD_PARTY_OPTIONS))
+                                   + "); same as --aggressive=stdlib")
     @magic_arguments.argument("--disable", default="", metavar="PASSES",
                               help="comma-separated pass names to skip: "
                                    + ", ".join((*PASS_NAMES, "jit")))

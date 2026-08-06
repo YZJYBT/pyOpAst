@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**新增 CLI 选项 `-O2`(= `--aggressive=stdlib`)——激进层,但不碰第三方库**:与 `-O3` 同一层契约,只排除产物会依赖第三方包的两项(`jit` → numba、`numpy` → numpy)。这两项在包缺失时本就会退回纯 Python,但产物源码里仍会出现 `numba`/`numpy` 字样;`-O2` 保证优化后的代码在只有标准库的解释器上照跑——冻结打包、分发单文件、目标机没装这两个包时用它。实现上引入**组别名**机制(`pipeline.AGGRESSIVE_GROUPS`,当前为 `all` / `stdlib`,`pipeline.THIRD_PARTY_OPTIONS` 是被排除的那批):别名可出现在任何写选项名的位置,也能混在逗号列表里,故 `--aggressive=stdlib,numpy` 表示"标准库那批再加回 numpy";未知名字的报错信息现在同时列出合法组名。
+
+同步到全部三个入口:主 CLI、`python -m opast.build`(冻结打包场景的正主)、以及 IPython cell magic——magic 顺带补上此前缺失的 `-O3` 别名,现在 `%%opast -O3` / `%%opast -O2` 与 CLI 完全一致。双语 README 与 magic docstring 同步更新。
+
 ## 0.6.0 (2026-08-06)
 
 **文档:** 双语 README 实测数字更新为本版 best-of-5 结果(默认 **2.23x** / 激进 **18.7x**,21 负载,激进列无低于 1.00x 的行);新增"**与 PyPy 可叠加**"小节——默认层产物交给 PyPy 7.3.21 跑,同一批负载 geomean **1.98x**(诚实注记:少数负载变慢,最差 0.62x;`--jit` 依赖 numba 仅限 CPython)。刻意不写 opast 与 PyPy 的正面对照表:这 21 个负载是为检验 opast 各 pass 而写,属主场,比较不公平。

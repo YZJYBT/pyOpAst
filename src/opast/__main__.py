@@ -12,6 +12,7 @@ from .pipeline import (
     AGGRESSIVE_NAMES,
     DEFAULT_MAX_ITERATIONS,
     PASS_NAMES,
+    THIRD_PARTY_OPTIONS,
     _normalize_disable,
     normalize_aggressive,
     optimize_file,
@@ -65,6 +66,13 @@ def main(argv: list[str] | None = None) -> int:
                                "Unlike the default passes these are not "
                                "proof-backed -- --report lists what each "
                                "one assumes")
+    parser.add_argument("-O2", dest="aggressive", action="store_const",
+                        const="stdlib",
+                        help="like -O3 minus the options that need a "
+                             "third-party package ("
+                             + ", ".join(sorted(THIRD_PARTY_OPTIONS))
+                             + "), so the optimized code runs on a bare "
+                               "interpreter; same as --aggressive=stdlib")
     parser.add_argument("--disable", metavar="PASSES", default="",
                         help="comma-separated pass names to skip: "
                              + ", ".join((*PASS_NAMES, "jit")))

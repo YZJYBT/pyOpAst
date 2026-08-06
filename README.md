@@ -87,7 +87,18 @@ opast -O3 script.py                           # same thing
 opast --aggressive=all script.py              # explicit spelling of the same
 opast --aggressive=annotations script.py      # pick a subset
 opast --aggressive --disable jit script.py    # all but one
+opast -O2 script.py                           # aggressive, third-party-free
+opast --aggressive=stdlib,numpy script.py     # stdlib group plus one back
 ```
+
+`-O2` (`--aggressive=stdlib`) is the same tier with the two options whose
+output leans on a third-party package left out — `jit` (numba) and `numpy`.
+Both of those degrade to plain Python when the package is missing, but the
+emitted source still mentions it; `-O2` keeps the optimized code runnable on
+a bare interpreter, which is what you want for freezing, for shipping a
+single file, or on a machine where neither package is installed. `stdlib` is
+a *group alias* usable anywhere an option name is, so it composes:
+`--aggressive=stdlib,numpy` adds one back.
 
 | Option | What it buys | What it assumes |
 | --- | --- | --- |
@@ -239,10 +250,10 @@ Reading the table honestly:
 ```powershell
 python -m opast.build src/ -o build_opt/ --entry main.py   # optimize a whole tree
 pyinstaller build_opt/main.py                              # freeze the optimized tree
-python -m opast.build src/ -o build_opt/ -O3 --disable jit # aggressive, still dependency-free
+python -m opast.build src/ -o build_opt/ -O2              # aggressive minus numba/numpy
 ```
 
-Optimizes every `.py` under a directory into a mirrored output tree (other files copied verbatim; `__pycache__`/VCS dirs skipped, `--exclude` adds more). A file the optimizer cannot process is copied unchanged with a warning — the build never breaks (`--strict` makes fallbacks fatal instead). Directory builds treat every file as a **library module** — its whole top level is public API, so unused-elimination and the aggressive `module-locals` option stay off (the import-hook contract, which now enforces the same); mark entry scripts with `--entry` for full script-mode cleanup. The default tier emits plain Python with **no runtime dependency on opast**, which is what makes the output suitable for freezing; `--jit` output imports `opast.jitsupport` at runtime — bundle opast and numba if you freeze it. Comments and formatting are not preserved (a leading `#!` shebang is); line numbers shift.
+Optimizes every `.py` under a directory into a mirrored output tree (other files copied verbatim; `__pycache__`/VCS dirs skipped, `--exclude` adds more). A file the optimizer cannot process is copied unchanged with a warning — the build never breaks (`--strict` makes fallbacks fatal instead). Directory builds treat every file as a **library module** — its whole top level is public API, so unused-elimination and the aggressive `module-locals` option stay off (the import-hook contract, which now enforces the same); mark entry scripts with `--entry` for full script-mode cleanup. The default tier emits plain Python with **no runtime dependency on opast**, which is what makes the output suitable for freezing; so does `-O2`, the aggressive tier minus the numba/numpy options. `--jit` output imports `opast.jitsupport` at runtime — bundle opast and numba if you freeze it. Comments and formatting are not preserved (a leading `#!` shebang is); line numbers shift.
 
 ## IPython / Jupyter
 
@@ -256,7 +267,7 @@ for i in range(50_000):
 total
 ```
 
-Options mirror the CLI; the cell executes in the user namespace, so assignments persist. Analyses are cell-scoped — see README-ZH for the notebook caveats.
+Options mirror the CLI, `-O3`/`-O2` included (`%%opast -O2` is the aggressive tier without the numba/numpy options — handy in a kernel that has neither). The cell executes in the user namespace, so assignments persist. Analyses are cell-scoped — see README-ZH for the notebook caveats.
 
 ## Experimental: `--jit` (numba, off by default; part of `--aggressive`)
 
