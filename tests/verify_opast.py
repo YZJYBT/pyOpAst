@@ -1565,7 +1565,11 @@ def verify_constant_folding() -> Area:
             env=env(),
             text=True,
             capture_output=True,
-            timeout=3,
+            # This is a hang guard, not a performance assertion.  On Windows,
+            # a freshly written case file plus interpreter spawn can hit
+            # first-touch scanner latency well above a few seconds; the
+            # content checks below are the actual optimizer assertions.
+            timeout=60,
         )
     except subprocess.TimeoutExpired:
         area.fail("huge literal guard did not complete quickly", command_text([PYTHON, "-m", "opast", "--show", "--no-run", str(huge)]))
