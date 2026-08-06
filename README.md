@@ -314,7 +314,15 @@ The reason it exists is not speed. **Stock `cythonize` is not semantics-preservi
 
 Both come from Cython's own "safe" type inference, which has no interval analysis to consult; opast's does (`j * j` is provably in `(0, 159996800016)`, so it needs 64 bits, so `j` must not be a 32-bit `long`). Turning that inference off is what restores the semantics, and the types opast can prove go back in explicitly.
 
-Measured honestly, on 21 workloads, best-of-7, all compiled by Cython: **0.93x geomean** against the same source compiled with stock Cython — a *loss*, because Cython's speed on several rows came from exactly the inference that produced the wrong answer above (the miscompiled comprehension was 1.55x faster than the correct one). Typing itself covers very little today: the all-or-nothing rule below leaves 2 of 52 benchmark functions typed, because a partially typed expression boxes values back into Python objects and measured **worse** than no typing at all (0.72x on a loop whose counter was typed and whose accumulator was not).
+Speed, measured on the 21 benchmark workloads with both sides compiled by Cython: **0.93x geomean best-of-7, 0.97x best-of-15** (medians 0.98x both times) — around break-even, with the cost concentrated where Cython's inference had been doing real work. Read those two numbers as a range, not a measurement: the unit here is *one module import in one process*, because a CPython extension cannot be re-executed in-process, and process spawn on Windows carries first-touch scanner spikes that best-of-N does not fully suppress. Individual rows moved by up to ±0.4x between runs.
+
+What is solid does not depend on that timing at all:
+
+- **19 of the 21 workloads receive no `cython.locals` whatsoever**, so their entire delta from plain `-O2` is the directive. Any loss there is the price of correctness, by construction.
+- A focused four-variant comparison of one workload (11 interleaved rounds, `-O2` / directive only / types only / both) prices the two halves separately: the directive costs **0.74–0.80x**, opast's types buy **1.73x** where they apply.
+- The single worst row in both full runs is the miscompiled comprehension (0.59x, 0.49x) — the wrong answer really was about twice as fast as the right one.
+
+Typing covers very little today: the all-or-nothing rule below leaves 2 of 52 benchmark functions typed, because a partially typed expression boxes values back into Python objects at every boundary and measured **worse** than no typing at all (0.72x on a loop whose counter was typed and whose accumulator was not).
 
 What a name must satisfy to be typed: proven float (a Python float *is* a C double), or proven int with an interval inside int64; definitely bound before every read; not captured by a nested scope or comprehension; not `del`eted, `global`/`nonlocal`, or compared with `is`; and every operand it meets in arithmetic must be typed too. The gap to the ceiling is the interval analysis, not the mechanism — hand-typing all five locals of a loop opast declines to type measured **11.35x**.
 
