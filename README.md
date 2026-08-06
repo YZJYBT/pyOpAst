@@ -34,7 +34,7 @@ A few individual rows: constant `eval`/`getattr` de-dynamization **48x**, inline
 
 ### It stacks with PyPy
 
-The default tier emits plain Python source with no runtime of its own, so it is not an alternative to a faster interpreter — it composes with one. Running the default-tier output on **PyPy 7.3.21** instead of the original source is a **1.98x** geomean over the same 21 workloads (best of 3, fresh process per run). The wins there come from the rewrites PyPy's tracing JIT cannot do for you — de-dynamization, optimize-time loop folding, comprehension and hoisting rewrites — while a few workloads come out slightly slower, because the JIT sometimes prefers the shape you wrote. `--jit` is CPython-only (numba), so on PyPy stay on the default tier.
+The default tier emits plain Python source with no runtime of its own, so it is not an alternative to a faster interpreter — it composes with one. Running the default-tier output on **PyPy 7.3.21** instead of the original source is a **1.98x** geomean over the same 21 workloads (best of 3, fresh process per run). The wins there come from the rewrites PyPy's tracing JIT cannot do for you — de-dynamization, optimize-time loop folding, comprehension and hoisting rewrites — while a few workloads come out **slower** (worst measured 0.62x), because the JIT sometimes traces the shape you wrote better than the one opast produced. `--jit` is CPython-only (numba), so on PyPy stay on the default tier.
 
 ### Self-hosting check
 
