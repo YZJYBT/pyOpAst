@@ -390,6 +390,30 @@ def annotated_params(scope: ast.AST, kind: str) -> frozenset[str]:
     )
 
 
+def annotated_locals(scope: ast.AST, kind: str) -> frozenset[str]:
+    """Locals of *scope* declared ``x: kind = ...`` by their **only** binding.
+
+    An annotation is evidence about one binding, not about a name: rebind
+    the name from a loop target, a tuple unpack or a second assignment and
+    it may hold something the annotation never described, with nothing
+    re-checking it at runtime.  Requiring the annotated statement to be the
+    sole binding is what makes the declaration usable as a fact -- the same
+    single-binding rule the module-level analyses use.
+    """
+    counts: "Counter[str]" = Counter()
+    annotated: set[str] = set()
+    for node in iter_region(scope):
+        counts.update(binding_names(node))
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+            and _is_annotation(node.annotation, kind)
+        ):
+            annotated.add(node.target.id)
+    return frozenset(n for n in annotated if counts.get(n, 0) == 1)
+
+
 def annotated_returns(tree: ast.Module, kind: str) -> frozenset[str]:
     """Module-level functions with a bare ``-> kind`` annotation that are
     bound exactly once and never declared ``global`` -- so a call to one of
@@ -531,7 +555,10 @@ def infer_float_names(
         elif isinstance(node, ast.AnnAssign):
             if isinstance(node.target, ast.Name) and node.value is not None:
                 recorded.add(id(node.target))
-                bindings.setdefault(node.target.id, []).append(node.value)
+                if node.target.id not in trusted:  # see infer_int_names
+                    bindings.setdefault(node.target.id, []).append(node.value)
+                else:
+                    bindings.setdefault(node.target.id, [])
         elif isinstance(node, ast.AugAssign):
             if isinstance(node.target, ast.Name):
                 recorded.add(id(node.target))
@@ -658,7 +685,13 @@ def infer_int_names(
         elif isinstance(node, ast.AnnAssign):
             if isinstance(node.target, ast.Name) and node.value is not None:
                 recorded.add(id(node.target))
-                bindings.setdefault(node.target.id, []).append(node.value)
+                # A *trusted* declaration is the fact: re-checking the value
+                # it was given would defeat the point of believing it (the
+                # caller vouches that this is the name's only binding).
+                if node.target.id not in trusted:
+                    bindings.setdefault(node.target.id, []).append(node.value)
+                else:
+                    bindings.setdefault(node.target.id, [])
         elif isinstance(node, ast.AugAssign):
             if isinstance(node.target, ast.Name):
                 recorded.add(id(node.target))

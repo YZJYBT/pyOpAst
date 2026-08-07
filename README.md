@@ -336,7 +336,16 @@ What a name must satisfy to be typed: proven float (a Python float *is* a C doub
 
 ### Annotated integers: checked mode
 
-An `int` annotation says "integer", never "small", so no interval can be derived from it — which is why, on its own, an annotated parameter is *not* typed. Under `--aggressive=annotations` it gets a second route: a function with an `int`-annotated parameter switches to **checked mode**, where every proven int in it is typed whether or not it is bounded, and the function carries `@cython.overflowcheck(True)`.
+An `int` annotation says "integer", never "small", so no interval can be derived from it — which is why, on its own, a declared name is *not* typed. Under `--aggressive=annotations` it gets a second route: when a believed `int` has no derivable interval, its function switches to **checked mode**, where every proven int in it is typed whether or not it is bounded, and the function carries `@cython.overflowcheck(True)`.
+
+Both parameters and locals are believed, `x: int = compute()` included — but a local only when the declaration is that name's **only** binding, since a name rebound afterwards (a loop target, a second assignment) may hold something the annotation never described and nothing re-checks it at runtime. The belief has to reach the fixpoint rather than just the declared name: `acc = (acc + i * x) % M` is provably int only once `x` is, so one opaque-but-declared local would otherwise drag the whole function down through the all-or-nothing rule.
+
+```python
+def b(): x: int = math.floor(2.5)   # believed -> checked mode, x/acc/i all typed
+def c(): x: float = math.sqrt(2.0)  # believed -> typed double, no check needed
+def d(): x: int = 5                 # provably bounded -> typed, no check needed
+def e(): x: int = f(); …; for x in r: …   # not the only binding -> nothing typed
+```
 
 That directive is the whole reason this is offered at all, because the two ways a C integer can go wrong are not equally loud. Converting an argument that does not fit int64 already raises `OverflowError` — Cython checks that boundary. Arithmetic *between* C integers does not: `4e9 * 4e9` in a typed function measured `-2446744073709551616`. `overflowcheck` makes that raise too, at a cost of about 0.79x. So the bet reads: **these values fit in 64 bits, and if they do not you get an exception rather than a wrong number** — a strictly louder contract than `--jit` offers for the same arithmetic, where int64 wraparound is silent.
 

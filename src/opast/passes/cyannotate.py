@@ -35,10 +35,20 @@ What is typed:
   "small".
 
 Which is why annotated ints get a second route, active only under the
-aggressive ``annotations`` option.  When a function has an ``int``-annotated
-parameter the whole function switches to **checked mode**: every proven int
-in it is typed, bounded or not, and the function carries
-``@cython.overflowcheck(True)``.  That matters because the two ways a C
+aggressive ``annotations`` option.  A bare ``int``/``float`` declaration is
+believed -- on a parameter, and on a local (``x: int = compute()``) whose
+declaration is the name's **only** binding, since a name rebound elsewhere
+may hold something the annotation never described and nothing re-checks it
+at runtime.  Belief has to reach the fixpoint, not just the declared name:
+``acc = (acc + i * x) % M`` is provably int only once ``x`` is, which is why
+a single opaque-but-declared local would otherwise drag a whole typeable
+function down through the all-or-nothing rule below.
+
+When any believed ``int`` in a function has no derivable interval, the whole
+function switches to **checked mode**: every proven int in it is typed,
+bounded or not, and the function carries ``@cython.overflowcheck(True)``.
+A declaration that *is* provably bounded (``x: int = 5``) needs none of
+that, and neither does a float.  That matters because the two ways a C
 integer can go wrong are not equally loud -- Cython already raises
 ``OverflowError`` converting an argument that does not fit int64, but
 arithmetic *between* C integers wraps silently (``4e9 * 4e9`` measured
@@ -75,6 +85,7 @@ import ast
 from ..analysis import (
     AnnotationTrust,
     all_bound_names,
+    annotated_locals,
     binding_names,
     builtin_gate,
     fresh_container_names,
@@ -371,18 +382,32 @@ class CythonAnnotation(ScopedTransformer):
             fresh_container_names(func) if self._len_ok else frozenset()
         )
         int_trusted = self._trust.ints(func)
+        # A declared local (``x: int = compute()``) is the same kind of
+        # evidence as a declared parameter, and just as unprovable from the
+        # value; without it one opaque-but-declared local drags a whole
+        # otherwise-typeable function down through the all-or-nothing rule.
+        # It joins the *trusted* set rather than being unioned in afterwards,
+        # because the names it feeds have to inherit the trust: an
+        # accumulator written ``acc = (acc + i * x) % M`` is only provably
+        # int once ``x`` is.  ``annotated_locals`` is what makes that sound
+        # -- it only reports declarations that are the name's sole binding.
+        local_ints: frozenset[str] = frozenset()
+        local_floats: frozenset[str] = frozenset()
+        if self._trust.enabled:
+            local_ints = annotated_locals(func, "int")
+            local_floats = annotated_locals(func, "float") - local_ints
         ints = infer_int_names(
             func,
             containers,
             range_ok=self._range_ok,
-            trusted=int_trusted,
+            trusted=int_trusted | local_ints,
             typed_calls=self._trust.int_returns,
         )
         floats = infer_float_names(
             func,
             ints,
             containers,
-            trusted=self._trust.floats(func),
+            trusted=self._trust.floats(func) | (local_floats - ints),
             typed_calls=self._trust.float_returns,
         )
         if not ints and not floats:
@@ -392,14 +417,19 @@ class CythonAnnotation(ScopedTransformer):
             trusted=int_trusted,
         )
         allowed = _definitely_bound(func) - _unsafe_names(func)
-        # An ``int`` annotation says "integer", never "small": such a
-        # parameter starts unbounded and no interval can be derived for it,
-        # nor for the locals it feeds.  Typing it anyway is worth doing --
-        # it is the whole point of annotating -- but only with
-        # ``overflowcheck``, which turns C wraparound into OverflowError.
-        # The check is per function, so once it is on every proven int in
-        # the function may be typed, bounded or not.
-        checked = bool(int_trusted & ints & allowed)
+        # An ``int`` annotation says "integer", never "small": a declared
+        # name starts unbounded and no interval can be derived for it, nor
+        # for what it feeds.  Typing it anyway is worth doing -- it is the
+        # whole point of annotating -- but only with ``overflowcheck``,
+        # which turns C wraparound into OverflowError.  A declaration whose
+        # value *is* provably bounded (``x: int = 5``) needs no such thing,
+        # so the trigger is an unbounded declared name, not merely a
+        # declared one.  The check is per function, so once it is on, every
+        # proven int in the function may be typed, bounded or not.
+        checked = any(
+            name in allowed and not _fits_int64(ranges.get(name))
+            for name in (int_trusted | local_ints)
+        )
         types = {
             name: _FLOAT_TYPE for name in sorted(floats) if name in allowed
         }
