@@ -314,7 +314,7 @@ It started as a correctness fix, and that half still matters most. **Stock `cyth
 
 Both come from Cython's own "safe" type inference, which has no interval analysis to consult; opast's does (`j * j` is provably in `(0, 159996800016)`, so it needs 64 bits, so `j` must not be a 32-bit `long`). Turning that inference off is what restores the semantics, and the types opast can prove go back in explicitly.
 
-Speed, on the 21 benchmark workloads with both sides compiled by Cython: **1.29x geomean, 1.05x median** (best-of-15). That average is not a broad win — it is two large ones. Coverage is still narrow (4 of 52 benchmark functions get typed at all), so most rows are ~1.0x, and the payoff lands where a hot function can be typed end to end:
+Speed, on the 21 benchmark workloads with both sides compiled by Cython: **1.29x geomean, 1.05x median** (best-of-15). That average is not a broad win — it is two large ones. Coverage is still narrow — 4 of the 36 functions in the benchmark workloads get typed at all — so most rows are ~1.0x, and the payoff lands where a hot function can be typed end to end:
 
 | | `-O2` + stock cythonize | `--cython` | |
 | --- | --- | --- | --- |
@@ -329,6 +329,7 @@ What does not depend on that timing at all:
 
 - Where nothing gets typed, `--cython` output differs from plain `-O2` **only** by the directive, so any loss there is the price of correctness by construction. A four-variant comparison of one workload prices the halves separately: the directive costs **0.74–0.80x**.
 - Partial typing is worse than none — a typed value meeting an untyped operand is boxed back into a Python object at every boundary (0.72x on a loop whose counter was typed and whose accumulator was not). Hence the all-or-nothing rule below, and hence the narrow coverage: opast declines far more often than it types.
+- *Which* functions qualify depends on the option set, because the pass runs last and reads whatever shape the earlier passes left. The same 21 workloads yield 4 typed functions under `-O2` and 4 under a bare `--aggressive=annotations`, but not the same 4 (`fastmath.work` in the first, `tailrec.work` in the second); with no aggressive options at all it is 2.
 - The worst row of every run is the miscompiled comprehension (0.49x–0.61x) — the wrong answer really was about twice as fast as the right one.
 
 What a name must satisfy to be typed: proven float (a Python float *is* a C double), or proven int with an interval inside int64; definitely bound before every read (one binding site must dominate every use — a name assigned in both arms of an `if` does not qualify); not captured by a nested scope or comprehension; not `del`eted, `global`/`nonlocal`, or compared with `is`; and every operand it meets in arithmetic must be typed too. The gap to the ceiling is the interval analysis, not the mechanism — hand-typing all five locals of a loop opast declines to type measured **11.35x**.
