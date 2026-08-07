@@ -28,19 +28,37 @@ What is typed:
   double -- the representation is identical, so there is no range question
   to answer.
 * ``cython.longlong`` for names **proven int whose interval fits int64**.
-  An int without a proven bound is left alone: Python ints are arbitrary
-  precision and a C integer would silently wrap.  This is why an
-  ``int``-annotated *parameter* is normally not typed -- the annotation says
-  "int", not "small" -- while a ``range()`` counter or a ``% M`` accumulator
-  usually is.
+  Without the bet below, an int with no proven bound is left alone: Python
+  ints are arbitrary precision and a C integer would silently wrap.  A
+  ``range()`` counter or a ``% M`` accumulator is usually provable this way;
+  a parameter is not, since an ``int`` annotation says "integer", never
+  "small".
+
+Which is why annotated ints get a second route, active only under the
+aggressive ``annotations`` option.  When a function has an ``int``-annotated
+parameter the whole function switches to **checked mode**: every proven int
+in it is typed, bounded or not, and the function carries
+``@cython.overflowcheck(True)``.  That matters because the two ways a C
+integer can go wrong are not equally loud -- Cython already raises
+``OverflowError`` converting an argument that does not fit int64, but
+arithmetic *between* C integers wraps silently (``4e9 * 4e9`` measured
+``-2446744073709551616``).  The directive makes the second case raise too,
+so the bet is "these values fit in 64 bits, and you get an exception rather
+than a wrong number if they do not" -- which costs about 0.79x, and is a
+strictly louder contract than the one ``--jit`` offers for the same
+arithmetic.  A float needs none of this: a Python float *is* a C double.
 
 Structural rejections (per name, any doubt -> not typed):
 
 * read anywhere before it is **definitely bound** -- a C variable has no
   unbound state, so ``UnboundLocalError`` would silently become 0.0/0.  A
-  name qualifies when it is a parameter, when a top-level assignment binds
-  it before every use, or when it is a top-level ``for`` target used only
-  inside that loop (the zero-iteration case never escapes);
+  name qualifies when one binding site dominates every use in the function:
+  a parameter, an assignment in some block with every use inside that block
+  from the assignment onwards, or a ``for`` target whose uses never leave
+  its own loop (a zero-trip loop leaves the target unbound).  The block need
+  not be the function's top level -- opast's own temporaries are routinely
+  bound one block deep -- but a name assigned in both arms of an ``if`` has
+  no single dominating site and is rejected;
 * captured by a nested function, lambda, class or comprehension (Cython
   cannot close over a typed local);
 * ``del``eted, declared ``global``/``nonlocal``, or compared with
@@ -96,6 +114,12 @@ except ImportError:
 
         @staticmethod
         def infer_types(_opast_on):
+            def _opast_identity(_opast_fn):
+                return _opast_fn
+            return _opast_identity
+
+        @staticmethod
+        def overflowcheck(_opast_on):
             def _opast_identity(_opast_fn):
                 return _opast_fn
             return _opast_identity
@@ -185,66 +209,90 @@ def _arithmetic_operands(func: ast.AST) -> set[str]:
     return names
 
 
-def _stmt_region(stmt: ast.stmt):
-    """*stmt*'s own region -- like :func:`iter_region` but for a single
-    statement, so nested scopes are yielded without being entered."""
-    return iter_region(ast.Module(body=[stmt], type_ignores=[]))
+def _statement_lists(func: ast.AST):
+    """Every statement list of *func*'s own region, outermost first.
+
+    Dominance is a per-block property, so the scan has to reach the body of
+    a loop or an ``if`` -- opast's own temporaries (a CSE result, a hoisted
+    invariant) are routinely bound one block deep and used two lines later.
+    """
+    stack = [func.body]
+    while stack:
+        block = stack.pop()
+        yield block
+        for stmt in block:
+            if isinstance(stmt, (
+                ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda
+            )):
+                continue  # a nested scope, not this region
+            for field in ("body", "orelse", "finalbody"):
+                inner = getattr(stmt, field, None)
+                if inner:
+                    stack.append(inner)
+            for handler in getattr(stmt, "handlers", []) or []:
+                stack.append(handler.body)
+
+
+def _loads(node: ast.AST, name: str) -> set[int]:
+    return {
+        id(n)
+        for n in ast.walk(node)
+        if isinstance(n, ast.Name) and n.id == name
+        and isinstance(n.ctx, ast.Load)
+    }
 
 
 def _definitely_bound(func: ast.AST) -> set[str]:
     """Names that provably hold a value at every point they are read.
 
     Typing a name that can be read while unbound would turn
-    ``UnboundLocalError`` into a silent zero, so the rule is deliberately
-    coarse: parameters, top-level assignments that precede every use, and
-    top-level ``for`` targets whose uses never leave the loop.
+    ``UnboundLocalError`` into a silent zero, so a name qualifies only when
+    one binding site **dominates every use in the function**: a parameter,
+    an assignment in some block with every use inside that block from the
+    assignment onwards, or a ``for`` target whose uses never leave its own
+    loop (a zero-trip loop leaves the target unbound).  A name bound in two
+    branches of an ``if`` has no single dominating site and is rejected.
     """
     ok: set[str] = set(param_names(func))
-    body = list(func.body)
+    candidates: set[str] = set()
+    for node in iter_region(func):
+        candidates.update(binding_names(node))
+    candidates -= ok
 
-    first_bind: dict[str, int] = {}
-    bind_stmt: dict[str, ast.stmt] = {}
-    uses: dict[str, set[int]] = {}
-    for index, stmt in enumerate(body):
-        for node in _stmt_region(stmt):
-            for name in binding_names(node):
-                if name not in first_bind:
-                    first_bind[name] = index
-                    bind_stmt[name] = stmt
-        for node in ast.walk(stmt):
-            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-                uses.setdefault(node.id, set()).add(index)
-
-    for name, index in first_bind.items():
-        if name in ok:
-            continue
-        stmt = bind_stmt[name]
-        seen = uses.get(name, set())
-        if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
-            # A plain top-level binding dominates everything after it.  The
-            # binding statement itself may read the name only on its right
-            # hand side, which would be a read-before-binding.
-            targets = (
-                stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]
-            )
-            if not any(
-                isinstance(t, ast.Name) and t.id == name for t in targets
-            ):
-                continue
-            value_reads = {
-                n.id
-                for n in ast.walk(stmt.value)
-                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
-            } if stmt.value is not None else set()
-            if name in value_reads:
-                continue
-            if all(use >= index for use in seen):
-                ok.add(name)
-        elif isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Name):
-            # The loop target only exists while the loop runs: a zero-trip
-            # loop leaves it unbound, so uses must stay inside the loop.
-            if stmt.target.id == name and seen <= {index}:
-                ok.add(name)
+    for name in candidates:
+        every_use = _loads(func, name)
+        for block in _statement_lists(func):
+            for index, stmt in enumerate(block):
+                if isinstance(stmt, (ast.Assign, ast.AnnAssign)):
+                    targets = (
+                        stmt.targets if isinstance(stmt, ast.Assign)
+                        else [stmt.target]
+                    )
+                    if not any(
+                        isinstance(t, ast.Name) and t.id == name
+                        for t in targets
+                    ):
+                        continue
+                    # The binding's own right-hand side reading the name
+                    # would itself be a read-before-binding.
+                    if stmt.value is not None and _loads(stmt.value, name):
+                        continue
+                    covered: set[int] = set()
+                    for later in block[index:]:
+                        covered |= _loads(later, name)
+                    if every_use <= covered:
+                        ok.add(name)
+                        break
+                elif (
+                    isinstance(stmt, ast.For)
+                    and isinstance(stmt.target, ast.Name)
+                    and stmt.target.id == name
+                ):
+                    if every_use <= _loads(stmt, name):
+                        ok.add(name)
+                        break
+            if name in ok:
+                break
     return ok
 
 
@@ -270,13 +318,13 @@ class CythonAnnotation(ScopedTransformer):
 
         # Decide the types first: the eligibility rules look at a function's
         # *own* decorators, which the directive below would otherwise mask.
-        typed: list[tuple[ast.FunctionDef, dict[str, str]]] = []
+        typed: list[tuple[ast.FunctionDef, dict[str, str], bool]] = []
         for parent in self._function_owners(tree):
             for stmt in parent.body:
                 if isinstance(stmt, ast.FunctionDef):
-                    types = self._types_for(stmt)
+                    types, checked = self._types_for(stmt)
                     if types:
-                        typed.append((stmt, types))
+                        typed.append((stmt, types, checked))
 
         annotated = 0
         # Disarm Cython's own inference everywhere.  It is the part of stock
@@ -289,9 +337,17 @@ class CythonAnnotation(ScopedTransformer):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 node.decorator_list.append(_directive("infer_types", False))
                 annotated += 1
-        for stmt, types in typed:
+        for stmt, types, checked in typed:
             stmt.decorator_list.insert(0, _locals_decorator(types))
             annotated += 1
+            if checked:
+                # Conversion into a C integer is already loud (Cython raises
+                # OverflowError for an argument outside int64); arithmetic
+                # between C integers is not, it wraps.  This directive makes
+                # that loud too, which is the whole reason an unbounded
+                # annotated int may be typed at all.
+                stmt.decorator_list.insert(0, _directive("overflowcheck", True))
+                annotated += 1
         if annotated:
             at = _shim_position(tree)
             tree.body[at:at] = ast.parse(_SHIM_SOURCE).body
@@ -307,9 +363,10 @@ class CythonAnnotation(ScopedTransformer):
             if isinstance(stmt, ast.ClassDef) and not stmt.decorator_list:
                 yield stmt
 
-    def _types_for(self, func: ast.FunctionDef) -> dict[str, str]:
+    def _types_for(self, func: ast.FunctionDef) -> tuple[dict[str, str], bool]:
+        """``(name -> C type, needs_overflowcheck)`` for *func*."""
         if func.decorator_list or _is_generator(func) or region_is_dynamic(func):
-            return {}
+            return {}, False
         containers = (
             fresh_container_names(func) if self._len_ok else frozenset()
         )
@@ -329,26 +386,35 @@ class CythonAnnotation(ScopedTransformer):
             typed_calls=self._trust.float_returns,
         )
         if not ints and not floats:
-            return {}
+            return {}, False
         ranges = infer_int_ranges(
             func, ints, containers, range_ok=self._range_ok,
             trusted=int_trusted,
         )
         allowed = _definitely_bound(func) - _unsafe_names(func)
+        # An ``int`` annotation says "integer", never "small": such a
+        # parameter starts unbounded and no interval can be derived for it,
+        # nor for the locals it feeds.  Typing it anyway is worth doing --
+        # it is the whole point of annotating -- but only with
+        # ``overflowcheck``, which turns C wraparound into OverflowError.
+        # The check is per function, so once it is on every proven int in
+        # the function may be typed, bounded or not.
+        checked = bool(int_trusted & ints & allowed)
         types = {
             name: _FLOAT_TYPE for name in sorted(floats) if name in allowed
         }
         types.update({
             name: _INT_TYPE
             for name in sorted(ints)
-            if name in allowed and _fits_int64(ranges.get(name))
+            if name in allowed
+            and (checked or _fits_int64(ranges.get(name)))
         })
         # All-or-nothing: a typed value meeting an untyped one pays for a
         # round trip through PyObject, which measured *worse* than leaving
         # the function alone (see _arithmetic_operands).
         if _arithmetic_operands(func) - set(types):
-            return {}
-        return dict(sorted(types.items()))
+            return {}, False
+        return dict(sorted(types.items())), checked
 
 
 def _directive(name: str, value) -> ast.expr:

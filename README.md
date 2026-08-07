@@ -296,7 +296,7 @@ After the static fixpoint, a one-shot pass decorates hot numeric functions with 
 
 ⚠️ Opt-in semantic caveat: numba integers are fixed 64-bit — intermediate values beyond ±9.2e18 wrap silently. This is why `--jit` is not on by default and not part of the semantic-preservation contract; the verification above is a safety net, not a proof.
 
-## Experimental: `--cython` (a correctness fix, not a speedup)
+## Experimental: `--cython` (correct first, fast where it can prove)
 
 ```powershell
 opast -O2 --cython -o build/hot.py hot.py
@@ -305,7 +305,7 @@ cythonize -i build/hot.py                  # your own build step
 
 `--cython` emits Cython pure-Python-mode annotations into the optimized source: `@cython.locals(...)` where a C type is **proven**, and `@cython.infer_types(False)` on every function. The output is still plain Python — a guarded import shim keeps it running on an interpreter with no Cython installed — so this only matters if you go on to compile it.
 
-The reason it exists is not speed. **Stock `cythonize` is not semantics-preserving**, and two of its deviations are reproducible in this repo's own benchmark suite:
+It started as a correctness fix, and that half still matters most. **Stock `cythonize` is not semantics-preserving**, and two of its deviations are reproducible in this repo's own benchmark suite:
 
 | Plain, correct Python | Stock Cython | opast `--cython` |
 | --- | --- | --- |
@@ -314,17 +314,42 @@ The reason it exists is not speed. **Stock `cythonize` is not semantics-preservi
 
 Both come from Cython's own "safe" type inference, which has no interval analysis to consult; opast's does (`j * j` is provably in `(0, 159996800016)`, so it needs 64 bits, so `j` must not be a 32-bit `long`). Turning that inference off is what restores the semantics, and the types opast can prove go back in explicitly.
 
-Speed, measured on the 21 benchmark workloads with both sides compiled by Cython: **0.93x geomean best-of-7, 0.97x best-of-15** (medians 0.98x both times) — around break-even, with the cost concentrated where Cython's inference had been doing real work. Read those two numbers as a range, not a measurement: the unit here is *one module import in one process*, because a CPython extension cannot be re-executed in-process, and process spawn on Windows carries first-touch scanner spikes that best-of-N does not fully suppress. Individual rows moved by up to ±0.4x between runs.
+Speed, on the 21 benchmark workloads with both sides compiled by Cython: **1.29x geomean, 1.05x median** (best-of-15). That average is not a broad win — it is two large ones. Coverage is still narrow (4 of 52 benchmark functions get typed at all), so most rows are ~1.0x, and the payoff lands where a hot function can be typed end to end:
 
-What is solid does not depend on that timing at all:
+| | `-O2` + stock cythonize | `--cython` | |
+| --- | --- | --- | --- |
+| `annotated` | 22.7 ms | **1.4 ms** | **16.6x** |
+| `strength` | 163.4 ms | **11.1 ms** | **14.8x** |
 
-- **19 of the 21 workloads receive no `cython.locals` whatsoever**, so their entire delta from plain `-O2` is the directive. Any loss there is the price of correctness, by construction.
-- A focused four-variant comparison of one workload (11 interleaved rounds, `-O2` / directive only / types only / both) prices the two halves separately: the directive costs **0.74–0.80x**, opast's types buy **1.73x** where they apply.
-- The single worst row in both full runs is the miscompiled comprehension (0.59x, 0.49x) — the wrong answer really was about twice as fast as the right one.
+(best-of-13 interleaved, identical results, and the same ratios by median — 17.0x and 11.7x — so this is not a min-of-N artifact.)
 
-Typing covers very little today: the all-or-nothing rule below leaves 2 of 52 benchmark functions typed, because a partially typed expression boxes values back into Python objects at every boundary and measured **worse** than no typing at all (0.72x on a loop whose counter was typed and whose accumulator was not).
+Treat the *small* numbers with suspicion, though: the unit here is one module import in one process, because a CPython extension cannot be re-executed in-process, and process spawn on Windows carries first-touch scanner spikes that best-of-N does not fully suppress. Rows near 1.0x have moved by ±0.4x between runs; two rows the full run reported as 0.71x and 0.72x measured 1.04x and 1.01x when re-run on their own. Only differences of the order above are worth reading.
 
-What a name must satisfy to be typed: proven float (a Python float *is* a C double), or proven int with an interval inside int64; definitely bound before every read; not captured by a nested scope or comprehension; not `del`eted, `global`/`nonlocal`, or compared with `is`; and every operand it meets in arithmetic must be typed too. The gap to the ceiling is the interval analysis, not the mechanism — hand-typing all five locals of a loop opast declines to type measured **11.35x**.
+What does not depend on that timing at all:
+
+- Where nothing gets typed, `--cython` output differs from plain `-O2` **only** by the directive, so any loss there is the price of correctness by construction. A four-variant comparison of one workload prices the halves separately: the directive costs **0.74–0.80x**.
+- Partial typing is worse than none — a typed value meeting an untyped operand is boxed back into a Python object at every boundary (0.72x on a loop whose counter was typed and whose accumulator was not). Hence the all-or-nothing rule below, and hence the narrow coverage: opast declines far more often than it types.
+- The worst row of every run is the miscompiled comprehension (0.49x–0.61x) — the wrong answer really was about twice as fast as the right one.
+
+What a name must satisfy to be typed: proven float (a Python float *is* a C double), or proven int with an interval inside int64; definitely bound before every read (one binding site must dominate every use — a name assigned in both arms of an `if` does not qualify); not captured by a nested scope or comprehension; not `del`eted, `global`/`nonlocal`, or compared with `is`; and every operand it meets in arithmetic must be typed too. The gap to the ceiling is the interval analysis, not the mechanism — hand-typing all five locals of a loop opast declines to type measured **11.35x**.
+
+### Annotated integers: checked mode
+
+An `int` annotation says "integer", never "small", so no interval can be derived from it — which is why, on its own, an annotated parameter is *not* typed. Under `--aggressive=annotations` it gets a second route: a function with an `int`-annotated parameter switches to **checked mode**, where every proven int in it is typed whether or not it is bounded, and the function carries `@cython.overflowcheck(True)`.
+
+That directive is the whole reason this is offered at all, because the two ways a C integer can go wrong are not equally loud. Converting an argument that does not fit int64 already raises `OverflowError` — Cython checks that boundary. Arithmetic *between* C integers does not: `4e9 * 4e9` in a typed function measured `-2446744073709551616`. `overflowcheck` makes that raise too, at a cost of about 0.79x. So the bet reads: **these values fit in 64 bits, and if they do not you get an exception rather than a wrong number** — a strictly louder contract than `--jit` offers for the same arithmetic, where int64 wraparound is silent.
+
+Measured on one annotated function (3M iterations, best-of-11, both sides Cython-compiled):
+
+```
+def hot(rounds: int, seed: int) -> int:      -O2 + stock cythonize   310.07 ms
+    total = 0                                --cython + annotations   34.47 ms   9.00x
+    for i in range(rounds):
+        total += (seed + i) * (seed + i) % 1000003
+    return total
+```
+
+with `hot(3_000_000, 7)` byte-identical to pure Python, and `seed=4e9` — which Python computes via bignums — raising `OverflowError` instead.
 
 ## Python API
 
