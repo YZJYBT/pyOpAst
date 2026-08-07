@@ -347,6 +347,8 @@ def d(): x: int = 5                 # provably bounded -> typed, no check needed
 def e(): x: int = f(); …; for x in r: …   # not the only binding -> nothing typed
 ```
 
+A false declaration fails **loudly, but not identically**. `s: int = str(n)` raises `TypeError` at the declaration once compiled — measured, both for a lie Python would also have tripped over and for one it never notices: a function that only ever calls `len(s)` returns `4953` in pure Python and raises `TypeError` compiled. That is the `annotations` assumption doing exactly what it says — you asserted a type, and if the assertion is false you get an exception rather than a wrong number — but it does mean an annotation Python tolerates can become an error here.
+
 That directive is the whole reason this is offered at all, because the two ways a C integer can go wrong are not equally loud. Converting an argument that does not fit int64 already raises `OverflowError` — Cython checks that boundary. Arithmetic *between* C integers does not: `4e9 * 4e9` in a typed function measured `-2446744073709551616`. `overflowcheck` makes that raise too, at a cost of about 0.79x. So the bet reads: **these values fit in 64 bits, and if they do not you get an exception rather than a wrong number** — a strictly louder contract than `--jit` offers for the same arithmetic, where int64 wraparound is silent.
 
 Measured on one annotated function (3M iterations, best-of-11, both sides Cython-compiled):
