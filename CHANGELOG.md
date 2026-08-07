@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 (2026-08-07)
 
 **新增实验性 `--cython`(第一步:把能证明的类型交给 Cython)** —— 新的一次性 pass `cython-annotate`(`passes/cyannotate.py`,不动点之后运行,与 `--jit` 互斥且 jit 优先),往产物里发射 Cython 纯 Python 模式标注:能证明的名字加 `@cython.locals(...)`,所有函数加 `@cython.infer_types(False)`。产物仍是普通 Python(带守卫的 import 垫片,没装 Cython 照跑),签名与 `__annotations__` **逐字节不变**(用装饰器而非改注解承载类型)。
 

@@ -51,7 +51,7 @@ def load_ipython_extension(ipython) -> None:
     _load(ipython)
 
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "AGGRESSIVE_GROUPS",
